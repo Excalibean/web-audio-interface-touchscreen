@@ -48,12 +48,14 @@
 
     // Touchscreen control function (touch only maybe???, mouse works like touch control anyway)
     function handleTouchControl(event) {
-        event.preventDefault();
+        event.preventDefault(); //to prevent accidental scrolling (very very important)
+
+        // Get area of touch zone, also checks for touch action in x and y calcs
         const rect = touchControlArea.getBoundingClientRect();
-        const x = (event.type.includes('touch') ? event.touches[0].clientX : event.clientX) - rect.left;
-        const y = (event.type.includes('touch') ? event.touches[0].clientY : event.clientY) - rect.top;
+        const x = (event.type.includes('touch') ? event.touches[0].clientX : event.clientX) - rect.left;  //side coord of touch
+        const y = (event.type.includes('touch') ? event.touches[0].clientY : event.clientY) - rect.top;   //vertical coord of touch
         
-        // Calculate position as percentage (0 to 1)
+        // Calculate position as percentage (0 to 1), only using x for speed control for now
         const position = x / rect.width;
         
         // Map position to speed range (-2 to 2)
