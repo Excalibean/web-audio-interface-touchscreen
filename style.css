@@ -60,16 +60,7 @@ header {
     box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
-#touch-control-area::before {
-    content: '';
-    position: absolute;
-    left: 50%;
-    top: 0;
-    bottom: 0;
-    width: 2px;
-    background: rgba(255, 255, 255, 0.5);
-    transform: translateX(-50%);
-}
+
 
 .zone-label {
     position: absolute;
@@ -86,11 +77,6 @@ header {
     left: 10%;
 }
 
-.center-label {
-    left: 50%;
-    transform: translate(-50%, -50%);
-    font-size: 2em;
-}
 
 .right-label {
     right: 10%;

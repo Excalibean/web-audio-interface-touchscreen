@@ -1,5 +1,4 @@
-
-    const uploadForm = document.getElementById('uploadForm');
+const uploadForm = document.getElementById('uploadForm');
     const fileInput = document.getElementById('audio-file');
     const speedSlider = document.getElementById('speed-slider');
     const speedLabel = document.getElementById('speed-label');
@@ -17,6 +16,8 @@
     const rewindOverlapLabel = document.getElementById('rewind-overlap-label');
     const rewindPlaybackSpeed = document.getElementById('rewind-playback-speed');
     const rewindPlaybackSpeedLabel = document.getElementById('rewind-playback-speed-label');
+    const baseBPMInput = document.getElementById('1x-bpm');
+    const baseBPMLabel = document.getElementById('1x-bpm-label');
     const progressBar = document.getElementById('progress-bar');
     const currentTimeDisplay = document.getElementById('current-time');
     const durationTimeDisplay = document.getElementById('duration-time');
@@ -25,6 +26,7 @@
     const touchControlArea = document.getElementById('touch-control-area');
     const touchIndicator = document.getElementById('touch-indicator');
 
+    //TO DO: 
 
     let audio = null;
     let currentAudio = null;
@@ -36,6 +38,23 @@
     let wasPlayingBeforeRewind = false;
     let isTouching = false; // Track if user is touching the control zone
     
+    // Gesture detection variables
+    let touchPoints = []; // Store touch positions for gesture detection
+    let lastTapTime = 0;
+    let tapCount = 0;
+    let tapTimes = []; // Store timestamps of recent taps
+    const TAP_WINDOW_MS = 2000; // Consider taps within 2 seconds for BPM calculation
+    const CIRCLE_POINTS_NEEDED = 10; // Number of points needed to detect a circle
+    const CIRCLE_UPDATE_POINTS = 5; // Update circle speed more frequently
+    let gestureMode = null; // 'tap' or 'circle' or null
+    let circleDirection = null; // 'clockwise' or 'counterclockwise'
+    let lastGestureTime = 0;
+    const GESTURE_TIMEOUT_MS = 3000; // If no gesture for 1 second, decay to default
+    const DEFAULT_DECAY_SPEED = 0.5; // Speed to decay to when no input
+    let decayTimeout = null;
+    let lastCircleUpdateTime = 0; // Track when we last updated circle speed
+    const CIRCLE_UPDATE_INTERVAL_MS = 100; // Update circle speed every 100ms
+    
     const FADE_TIME = 0.04;
     const DEFAULT_TRACK = 'default_audiobook.mp3';
 
@@ -46,6 +65,174 @@
     let speedActual = 1.0; // Actual speed (smoothed)
     let speedIntegratorInterval = null;
 
+    // Gesture detection functions
+    function calculateAngle(p1, p2) {
+        return Math.atan2(p2.y - p1.y, p2.x - p1.x);
+    }
+
+    function detectCircleGesture() {
+        if (touchPoints.length < CIRCLE_POINTS_NEEDED) return null;
+        
+        // Use the last N points to detect circular motion
+        const recentPoints = touchPoints.slice(-CIRCLE_POINTS_NEEDED);
+        let totalAngleChange = 0;
+        
+        // Calculate cumulative angle changes
+        for (let i = 2; i < recentPoints.length; i++) {
+            const angle1 = calculateAngle(recentPoints[i-2], recentPoints[i-1]);
+            const angle2 = calculateAngle(recentPoints[i-1], recentPoints[i]);
+            let angleDiff = angle2 - angle1;
+            
+            // Normalize angle difference to -PI to PI
+            while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+            while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+            
+            totalAngleChange += angleDiff;
+        }
+        
+        // Determine if it's a circle and which direction
+        const threshold = Math.PI / 2; // Need at least 90 degrees of rotation
+        
+        if (totalAngleChange > threshold) {
+            return 'clockwise';
+        } else if (totalAngleChange < -threshold) {
+            return 'counterclockwise';
+        }
+        
+        return null;
+    }
+
+    function calculateCircleSpeed() {
+        // Calculate how fast circles are being drawn
+        if (touchPoints.length < CIRCLE_UPDATE_POINTS) return 0;
+        
+        const recentPoints = touchPoints.slice(-CIRCLE_UPDATE_POINTS);
+        const timeSpan = (recentPoints[recentPoints.length - 1].time - recentPoints[0].time) / 1000; // in seconds
+        
+        if (timeSpan === 0) return 0;
+        
+        // Calculate total angle change in the recent points
+        let totalAngleChange = 0;
+        for (let i = 2; i < recentPoints.length; i++) {
+            const angle1 = calculateAngle(recentPoints[i-2], recentPoints[i-1]);
+            const angle2 = calculateAngle(recentPoints[i-1], recentPoints[i]);
+            let angleDiff = angle2 - angle1;
+            
+            // Normalize angle difference to -PI to PI
+            while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+            while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+            
+            totalAngleChange += Math.abs(angleDiff);
+        }
+        
+        // Calculate angular velocity (radians per second)
+        const angularVelocity = totalAngleChange / timeSpan;
+        
+        // Convert to circles per second (2π radians = 1 circle)
+        const circlesPerSecond = angularVelocity / (2 * Math.PI);
+        
+        return circlesPerSecond;
+    }
+
+    function calculateBPMFromTaps() {
+        // Clean up old taps outside the window
+        const now = Date.now();
+        tapTimes = tapTimes.filter(time => now - time < TAP_WINDOW_MS);
+        
+        if (tapTimes.length < 2) return null;
+        
+        // Calculate average interval between taps
+        let totalInterval = 0;
+        for (let i = 1; i < tapTimes.length; i++) {
+            totalInterval += tapTimes[i] - tapTimes[i-1];
+        }
+        const avgInterval = totalInterval / (tapTimes.length - 1);
+        
+        // Convert to BPM
+        const bpm = 60000 / avgInterval; // 60000ms = 1 minute
+        return bpm;
+    }
+
+    function bpmToSpeed(bpm) {
+        // Map BPM to playback speed
+        // Use adjustable base BPM from slider
+        const baseBPM = parseFloat(baseBPMInput?.value || 60); // BPM that corresponds to 1x speed
+        return Math.max(0.25, Math.min(4, bpm / baseBPM));
+    }
+
+    function circleSpeedToRewindSpeed(circleSpeed) {
+        // circleSpeed is in circles per second
+        // Map to negative speed range
+        // Fast circles = faster rewind (more negative)
+        const maxCirclesPerSec = 2.0; // Adjust this to control sensitivity
+        const maxSpeed = -2.0; // Maximum rewind speed
+        const minCirclesForRewind = 0.1; // Minimum circle speed to trigger rewind
+        
+        // Clamp circle speed
+        const clampedSpeed = Math.max(0, Math.min(circleSpeed, maxCirclesPerSec));
+        
+        // Only apply rewind if above minimum threshold
+        if (clampedSpeed < minCirclesForRewind) {
+            return 0; // No rewind for very slow movements
+        }
+        
+        // Linear mapping from circle speed to rewind speed
+        const ratio = clampedSpeed / maxCirclesPerSec;
+        return maxSpeed * ratio; // Returns value from 0 to -2
+    }
+
+    function detectTap(x, y) {
+        const now = Date.now();
+        
+        // Check if this is a tap (small movement within a short time)
+        if (touchPoints.length < 3) {
+            // Register tap
+            tapTimes.push(now);
+            tapCount++;
+            return true;
+        }
+        
+        // Check if movement is small enough to be a tap
+        const firstPoint = touchPoints[0];
+        const distance = Math.sqrt(Math.pow(x - firstPoint.x, 2) + Math.pow(y - firstPoint.y, 2));
+        
+        if (distance < 30) { // 30px threshold for tap
+            tapTimes.push(now);
+            tapCount++;
+            return true;
+        }
+        
+        return false;
+    }
+
+    function startDecayToDefault() {
+        // Clear any existing decay timeout
+        if (decayTimeout) {
+            clearTimeout(decayTimeout);
+        }
+        
+        decayTimeout = setTimeout(() => {
+            // If in rewind mode, switch to forward
+            if (speedTarget < 0) {
+                speedTarget = DEFAULT_DECAY_SPEED;
+            } else {
+                // Gradually decay to default speed
+                speedTarget = DEFAULT_DECAY_SPEED;
+            }
+            
+            // Update slider
+            if (speedSlider) {
+                speedSlider.value = speedTarget;
+            }
+            setSpeedLabel(speedTarget);
+            
+            // Reset gesture mode
+            gestureMode = null;
+            circleDirection = null;
+            
+        }, GESTURE_TIMEOUT_MS);
+    }
+
     // Touchscreen control function (touch only maybe???, mouse works like touch control anyway)
     function handleTouchControl(event) {
         event.preventDefault(); //to prevent accidental scrolling (very very important)
@@ -55,51 +242,166 @@
         const x = (event.type.includes('touch') ? event.touches[0].clientX : event.clientX) - rect.left;  //side coord of touch
         const y = (event.type.includes('touch') ? event.touches[0].clientY : event.clientY) - rect.top;   //vertical coord of touch
         
-        // Calculate position as percentage (0 to 1), only using x for speed control for now
-        const position = x / rect.width;
+        // Store touch point for gesture detection
+        const now = Date.now();
+        touchPoints.push({ x, y, time: now });
         
-        // Map position to speed range (-2 to 2)
-        const minSpeed = -2.0;
-        const maxSpeed = 2.0;
-        const newSpeed = minSpeed + (position * (maxSpeed - minSpeed));
+        // Keep only recent points (last 2 seconds)
+        touchPoints = touchPoints.filter(p => now - p.time < 2000);
         
-        // Update speed target
-        speedTarget = Math.max(minSpeed, Math.min(maxSpeed, newSpeed));
+        // Update last gesture time
+        lastGestureTime = now;
         
-        // Update slider to match
-        if (speedSlider) {
-            speedSlider.value = speedTarget;
+        // Detect circle gesture direction (counter or clockwise)
+        const direction = detectCircleGesture();
+        
+        if (direction) {
+            gestureMode = 'circle';
+            circleDirection = direction;
+            
+            // Clear tap data when doing circles
+            tapTimes = [];
         }
         
-        // Update labels
-        setSpeedLabel(speedTarget);
+        // Continuously update circle speed if in circle mode
+        if (gestureMode === 'circle' && circleDirection === 'counterclockwise') {
+            // Update speed more frequently for responsive control
+            if (now - lastCircleUpdateTime > CIRCLE_UPDATE_INTERVAL_MS) {
+                const circleSpeed = calculateCircleSpeed();
+                const rewindSpeed = circleSpeedToRewindSpeed(circleSpeed);
+                speedTarget = rewindSpeed;
+                lastCircleUpdateTime = now;
+                
+                // Update slider and labels
+                if (speedSlider) {
+                    speedSlider.value = speedTarget;
+                }
+                setSpeedLabel(speedTarget);
+            }
+        } else if (gestureMode === 'circle' && circleDirection === 'clockwise') {
+            // Clockwise - ignore or implement forward gesture
+            gestureMode = null;
+        }
         
         // Update touch indicator position
         if (touchIndicator) {
             touchIndicator.classList.add('active');
             touchIndicator.style.left = `${x - 30}px`; // Center the indicator (30px = half width)
             touchIndicator.style.top = `${y - 30}px`; // Center the indicator (30px = half height)
+            
+            // Change indicator color based on gesture mode and speed
+            if (gestureMode === 'circle' && circleDirection === 'counterclockwise') {
+                // Vary red intensity based on rewind speed
+                const intensity = Math.abs(speedTarget / 2.0); // 0 to 1
+                const red = Math.floor(255 * Math.max(0.4, intensity)); // At least 40% red
+                touchIndicator.style.background = `rgba(${red}, 100, 100, 0.8)`;
+            } else if (gestureMode === 'tap') {
+                touchIndicator.style.background = 'rgba(100, 255, 100, 0.8)'; // Green for tapping
+            } else {
+                touchIndicator.style.background = 'rgba(255, 255, 255, 0.8)'; // White default
+            }
         }
     }
 
     function handleTouchStart(event) {
         isTouching = true;
-        handleTouchControl(event);
+        
+        // Reset gesture tracking
+        touchPoints = [];
+        gestureMode = null;
+        circleDirection = null;
+        
+        // Just record the initial touch point
+        event.preventDefault();
+        const rect = touchControlArea.getBoundingClientRect();
+        const x = (event.type.includes('touch') ? event.touches[0].clientX : event.clientX) - rect.left;
+        const y = (event.type.includes('touch') ? event.touches[0].clientY : event.clientY) - rect.top;
+        const now = Date.now();
+        
+        touchPoints.push({ x, y, time: now });
+        
+        // Show indicator at touch position
+        if (touchIndicator) {
+            touchIndicator.classList.add('active');
+            touchIndicator.style.left = `${x - 30}px`;
+            touchIndicator.style.top = `${y - 30}px`;
+            touchIndicator.style.background = 'rgba(255, 255, 255, 0.8)'; // White default
+        }
+        
+        // Start decay timer on touch down (resets on gesture detected)
+        startDecayToDefault();
     }
 
     function handleTouchMove(event) {
         if (isTouching) {
+            // Clear decay timeout when movement is detected
+            if (decayTimeout) {
+                clearTimeout(decayTimeout);
+                decayTimeout = null;
+            }
+            
             handleTouchControl(event);
         }
     }
 
     function handleTouchEnd(event) {
         isTouching = false;
+        
+        const now = Date.now();
+        
+        // Check if this was a tap gesture (quick touch and release)
+        if (touchPoints.length > 0) {
+            const firstPoint = touchPoints[0];
+            const lastPoint = touchPoints[touchPoints.length - 1];
+            const distance = Math.sqrt(
+                Math.pow(lastPoint.x - firstPoint.x, 2) + 
+                Math.pow(lastPoint.y - firstPoint.y, 2)
+            );
+            
+            const touchDuration = now - firstPoint.time;
+            
+            // Only count as tap if:
+            // 1. Small movement (< 30px)
+            // 2. Quick release (< 200ms) - this prevents press-and-hold
+            // 3. Not too many touch points (< 5) - prevents drag from being counted
+            if (distance < 30 && touchDuration < 200 && touchPoints.length < 5) {
+                // Clear decay timeout for tap gesture
+                if (decayTimeout) {
+                    clearTimeout(decayTimeout);
+                    decayTimeout = null;
+                }
+                
+                gestureMode = 'tap';
+                tapTimes.push(now);
+                
+                // Calculate BPM from taps
+                const bpm = calculateBPMFromTaps();
+                if (bpm) {
+                    const speed = bpmToSpeed(bpm);
+                    speedTarget = speed;
+                    
+                    // Update slider and labels
+                    if (speedSlider) {
+                        speedSlider.value = speedTarget;
+                    }
+                    setSpeedLabel(speedTarget);
+                }
+            }
+        }
+        
+        // Reset touch points
+        touchPoints = [];
+        
         if (touchIndicator) {
             touchIndicator.classList.remove('active');
+            touchIndicator.style.background = 'rgba(255, 255, 255, 0.8)'; // Reset color
         }
+        
+        // Restart decay timer on touch end
+        startDecayToDefault();
     }
     //Touch control function ends here, Event Listeners below near bottom
+    //Audiobook functions start here
 
     // Helper functions
     function setSpeedLabel(v) {
@@ -142,6 +444,7 @@
         const basePeriod = parseFloat(rewindPeriod?.value || 0.5);
         const baseOverlap = parseFloat(rewindOverlap?.value || 0.3);
         const basePlaybackSpeed = parseFloat(rewindPlaybackSpeed?.value || 1);
+        const baseBPM = parseFloat(baseBPMInput?.value || 60);
         
         if (isNegative && currentSpeed > 0) {
             // Calculate actual values being used during rewind (for user display)
@@ -180,6 +483,10 @@
         
         if (rewindPlaybackSpeedLabel) {
             rewindPlaybackSpeedLabel.textContent = `${basePlaybackSpeed.toFixed(2)}x`;
+        }
+        
+        if (baseBPMLabel) {
+            baseBPMLabel.textContent = `${baseBPM.toFixed(0)} BPM`;
         }
     }
 
@@ -497,7 +804,14 @@
     playButton?.addEventListener('click', () => {
         if (!audio) return;
         
-        const currentSpeed = speedActual; // Use smoothed speed
+        // Set speed to default when pressing play (if paused)
+        if (audio.paused) {
+            speedTarget = 1.0
+            if (speedSlider) speedSlider.value = speedTarget;
+            setSpeedLabel(speedTarget);
+        }
+        
+        const currentSpeed = speedTarget;
         
         if (currentSpeed < 0) {
             if (rewindInterval) {
@@ -551,6 +865,8 @@
     [chunkSizeInput, rewindStepInput, rewindPeriod, rewindOverlap, rewindPlaybackSpeed].forEach(slider => {
         slider?.addEventListener('input', updateParameterLabels);
     });
+
+    baseBPMInput?.addEventListener('input', updateParameterLabels);
 
     // Touchscreen control zone event listeners
     if (touchControlArea) {
