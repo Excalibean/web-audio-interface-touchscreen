@@ -26,7 +26,11 @@ const uploadForm = document.getElementById('uploadForm');
     const touchControlArea = document.getElementById('touch-control-area');
     const touchIndicator = document.getElementById('touch-indicator');
 
-    //TO DO: 
+    //TO DO: Add alpha, decay timeout, refine gestures, and integrate forward circle/swiping gestures
+    // Use, take notes, and debug session (simulate user experience)
+    // Speed = Speed - alpha * (Speed - Target)
+    // Target = Amplitude * Gesture
+    // 
 
     let audio = null;
     let currentAudio = null;
@@ -60,7 +64,6 @@ const uploadForm = document.getElementById('uploadForm');
 
     // leaky integrator parameters for speed slider (Low Pass Filter)
     const TICK_MS = 50; // Update every 50ms
-    const ALPHA = 0.05; // Convergence rate (0-1, higher = faster response)
     let speedTarget = 1.0; // Target speed from slider
     let speedActual = 1.0; // Actual speed (smoothed)
     let speedIntegratorInterval = null;
@@ -162,7 +165,7 @@ const uploadForm = document.getElementById('uploadForm');
 
     function circleSpeedToRewindSpeed(circleSpeed) {
         // circleSpeed is in circles per second
-        // Map to negative speed range
+        // Map to NEGATIVE speed range
         // Fast circles = faster rewind (more negative)
         const maxCirclesPerSec = 2.0; // Adjust this to control sensitivity
         const maxSpeed = -2.0; // Maximum rewind speed
@@ -179,6 +182,27 @@ const uploadForm = document.getElementById('uploadForm');
         // Linear mapping from circle speed to rewind speed
         const ratio = clampedSpeed / maxCirclesPerSec;
         return maxSpeed * ratio; // Returns value from 0 to -2
+    }
+
+        function circleSpeedToForwardSpeed(circleSpeed) {
+        // circleSpeed is in circles per second
+        // Map to POSITIVE speed range
+        // Fast circles = faster forward playback (more positive)
+        const maxCirclesPerSec = 2.0; // Adjust this to control sensitivity
+        const maxSpeed = 2.0; // Maximum forward speed
+        const minCirclesForForward = 0.1; // Minimum circle speed to trigger forward playback
+        
+        // Clamp circle speed
+        const clampedSpeed = Math.max(0, Math.min(circleSpeed, maxCirclesPerSec));
+        
+        // Only apply forward if above minimum threshold
+        if (clampedSpeed < minCirclesForForward) {
+            return 0; // No forward for very slow movements
+        }
+        
+        // Linear mapping from circle speed to forward speed
+        const ratio = clampedSpeed / maxCirclesPerSec;
+        return maxSpeed * ratio; // Returns value from 0 to +2
     }
 
     function detectTap(x, y) {
@@ -212,19 +236,40 @@ const uploadForm = document.getElementById('uploadForm');
         }
         
         decayTimeout = setTimeout(() => {
-            // If in rewind mode, switch to forward
-            if (speedTarget < 0) {
-                speedTarget = DEFAULT_DECAY_SPEED;
-            } else {
-                // Gradually decay to default speed
-                speedTarget = DEFAULT_DECAY_SPEED;
-            }
+            let decayInterval = null; // Store the interval reference
             
-            // Update slider
-            if (speedSlider) {
-                speedSlider.value = speedTarget;
-            }
-            setSpeedLabel(speedTarget);
+            // Instead of instantly setting speedTarget, gradually decay it
+            decayInterval = setInterval(() => {
+                // If in rewind mode, decay toward forward mode first
+                if (speedTarget < 0) {
+                    // Gradually move from negative to DEFAULT_DECAY_SPEED
+                    const decayStep = 0.05; // How much to change per tick
+                    speedTarget = Math.min(DEFAULT_DECAY_SPEED, speedTarget + decayStep);
+                } else if (speedTarget > DEFAULT_DECAY_SPEED) {
+                    // Gradually slow down from fast to DEFAULT_DECAY_SPEED
+                    const decayStep = 0.02; // Slower decay for forward speeds
+                    speedTarget = Math.max(DEFAULT_DECAY_SPEED, speedTarget - decayStep);
+                } else if (speedTarget < DEFAULT_DECAY_SPEED) {
+                    // Gradually speed up from slow to DEFAULT_DECAY_SPEED
+                    const decayStep = 0.02;
+                    speedTarget = Math.min(DEFAULT_DECAY_SPEED, speedTarget + decayStep);
+                } else {
+                    // Already at default speed, stop decaying
+                    clearInterval(decayInterval);
+                }
+                
+                // Check if we've reached the target
+                if (Math.abs(speedTarget - DEFAULT_DECAY_SPEED) < 0.01) {
+                    speedTarget = DEFAULT_DECAY_SPEED;
+                    clearInterval(decayInterval);
+                }
+                
+                // Update slider WITHOUT updating label (label updates via leaky integrator)
+                if (speedSlider) {
+                    speedSlider.value = speedTarget;
+                }
+                
+            }, 100); // Update every 100ms for smooth decay
             
             // Reset gesture mode
             gestureMode = null;
@@ -280,7 +325,18 @@ const uploadForm = document.getElementById('uploadForm');
             }
         } else if (gestureMode === 'circle' && circleDirection === 'clockwise') {
             // Clockwise - ignore or implement forward gesture
-            gestureMode = null;
+            if (now - lastCircleUpdateTime > CIRCLE_UPDATE_INTERVAL_MS) {
+                const circleSpeed = calculateCircleSpeed();
+                const forwardSpeed = circleSpeedToForwardSpeed(circleSpeed);
+                speedTarget = forwardSpeed;
+                lastCircleUpdateTime = now;
+                
+                // Update slider and labels
+                if (speedSlider) {
+                    speedSlider.value = speedTarget;
+                }
+                setSpeedLabel(speedTarget);
+            }
         }
         
         // Update touch indicator position
@@ -295,6 +351,11 @@ const uploadForm = document.getElementById('uploadForm');
                 const intensity = Math.abs(speedTarget / 2.0); // 0 to 1
                 const red = Math.floor(255 * Math.max(0.4, intensity)); // At least 40% red
                 touchIndicator.style.background = `rgba(${red}, 100, 100, 0.8)`;
+            } else if (gestureMode === 'circle' && circleDirection === 'clockwise') { // ← ADD THIS
+                // Vary blue intensity based on forward speed
+                const intensity = Math.abs(speedTarget / 2.0); // 0 to 1
+                const blue = Math.floor(255 * Math.max(0.4, intensity)); // At least 40% blue
+                touchIndicator.style.background = `rgba(100, 100, ${blue}, 0.8)`;
             } else if (gestureMode === 'tap') {
                 touchIndicator.style.background = 'rgba(100, 255, 100, 0.8)'; // Green for tapping
             } else {
@@ -495,6 +556,7 @@ const uploadForm = document.getElementById('uploadForm');
         if (speedIntegratorInterval) return; // Already running
         
         speedIntegratorInterval = setInterval(() => {
+            const ALPHA = parseFloat(document.getElementById('alpha')?.value || 0.15);
             // Advance speedActual toward speedTarget
             speedActual = speedActual + ALPHA * (speedTarget - speedActual); //Low Pass Filter equation
             
@@ -809,6 +871,7 @@ const uploadForm = document.getElementById('uploadForm');
             speedTarget = 1.0
             if (speedSlider) speedSlider.value = speedTarget;
             setSpeedLabel(speedTarget);
+            startDecayToDefault();
         }
         
         const currentSpeed = speedTarget;
