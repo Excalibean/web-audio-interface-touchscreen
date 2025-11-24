@@ -1269,9 +1269,9 @@ const uploadForm = document.getElementById('uploadForm');
             if (leftZoneLabel) leftZoneLabel.textContent = 'Up to Rewind ⬆️';
             if (rightZoneLabel) rightZoneLabel.textContent = 'Down for Forward ⬇️';
         } else {
-            if (inputModeLabel) inputModeLabel.textContent = 'Tapping';
-            if (leftZoneLabel) leftZoneLabel.textContent = 'Circles to Rewind 🔄';
-            if (rightZoneLabel) rightZoneLabel.textContent = 'Tap for Forward';
+            if (inputModeLabel) inputModeLabel.textContent = 'Tapping/Circling';
+            if (leftZoneLabel) leftZoneLabel.textContent = 'Circles Rewind/Forward 🔄';
+            if (rightZoneLabel) rightZoneLabel.textContent = 'Taps Forward';
         }
     }
 
