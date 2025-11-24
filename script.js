@@ -25,6 +25,10 @@ const uploadForm = document.getElementById('uploadForm');
     // Touchscreen control elements
     const touchControlArea = document.getElementById('touch-control-area');
     const touchIndicator = document.getElementById('touch-indicator');
+    const inputModeToggle = document.getElementById('input-mode-toggle');
+    const inputModeLabel = document.getElementById('input-mode-label');
+    const leftZoneLabel = document.getElementById('left-zone-label');
+    const rightZoneLabel = document.getElementById('right-zone-label');
 
     //TO DO: Add alpha, decay timeout, refine gestures, and integrate forward circle/swiping gestures
     // Use, take notes, and debug session (simulate user experience)
@@ -41,6 +45,33 @@ const uploadForm = document.getElementById('uploadForm');
     let isRewinding = false;
     let wasPlayingBeforeRewind = false;
     let isTouching = false; // Track if user is touching the control zone
+    let inputMode = 'tap'; // 'tap' or 'scroll' - Defaults to 'tap'
+    
+    // Scroll detection variables
+    let scrollHistory = []; // Store recent scroll events with timestamps
+    let lastScrollUpdateTime = 0;
+    let currentScrollDirection = null; // 'up' or 'down' or null
+    const SCROLL_HISTORY_WINDOW_MS = 200; // Consider scroll events within 200ms
+    const SCROLL_UPDATE_INTERVAL_MS = 50; // Update scroll speed every 50ms
+    const SCROLL_SMOOTHING = 0.3; // Smoothing factor for scroll speed
+    const MAX_SCROLL_SPEED = 2400;
+    const SCROLL_SENSITIVITY_FACTOR = 5; // Higher = requires more scrolling to reach extremes
+    const SLOW_SCROLL_THRESHOLD = 0.05;
+    const FAST_SCROLL_THRESHOLD = 0.85;
+    const EXTREME_SCROLL_THRESHOLD = 0.97;
+    const MAX_PLAYBACK_RATE = 4;
+    const SCROLL_STOP_DEBOUNCE_MS = 300;
+    const SCROLL_DECAY_MIN_DELAY_MS = 2000;
+    const SCROLL_DECAY_MAX_DELAY_MS = 8000;
+    const SCROLL_DECAY_MAX_SESSION_MS = 6000;
+    
+    // Touch scroll detection (for mobile)
+    let touchScrollStartY = null;
+    let touchScrollStartTime = null;
+    let touchScrollLastY = null;
+    let touchScrollLastTime = null;
+    let scrollSessionStartTime = null;
+    let scrollDecayStartTimeout = null;
     
     // Gesture detection variables
     let touchPoints = []; // Store touch positions for gesture detection
@@ -56,6 +87,7 @@ const uploadForm = document.getElementById('uploadForm');
     const GESTURE_TIMEOUT_MS = 3000; // If no gesture for 1 second, decay to default
     const DEFAULT_DECAY_SPEED = 0.5; // Speed to decay to when no input
     let decayTimeout = null;
+    let decayIntervalHandle = null;
     let lastCircleUpdateTime = 0; // Track when we last updated circle speed
     const CIRCLE_UPDATE_INTERVAL_MS = 100; // Update circle speed every 100ms
     
@@ -209,6 +241,96 @@ const uploadForm = document.getElementById('uploadForm');
         return Math.min(maxSpeed, clampedSpeed); // Clamp to max speed
     }
 
+    // Bell curve function to map scroll speed to playback speed
+    function scrollSpeedToPlaybackSpeed(rawScrollSpeed) {
+        const normalizedSpeed = Math.min(
+            1,
+            Math.abs(rawScrollSpeed) / (MAX_SCROLL_SPEED * SCROLL_SENSITIVITY_FACTOR)
+        );
+        const mu = 0.5;
+        const sigma = 0.25;
+        const bellValue = Math.exp(-Math.pow((normalizedSpeed - mu) / sigma, 2) / 2);
+        let playbackSpeed;
+        
+        if (normalizedSpeed < SLOW_SCROLL_THRESHOLD) {
+            playbackSpeed = (normalizedSpeed / SLOW_SCROLL_THRESHOLD) * 0.25; // Glide toward 0x
+        } else if (normalizedSpeed < FAST_SCROLL_THRESHOLD) {
+            // Keep most scroll speeds clustered near 1x using bell curve
+            playbackSpeed = 0.6 + bellValue * 0.6; // ≈0.6x to 1.2x
+        } else if (normalizedSpeed < EXTREME_SCROLL_THRESHOLD) {
+            const fastFactor = (normalizedSpeed - FAST_SCROLL_THRESHOLD) / (EXTREME_SCROLL_THRESHOLD - FAST_SCROLL_THRESHOLD);
+            playbackSpeed = 1 + fastFactor; // Approach 2x as scroll accelerates
+        } else {
+            const extremeFactor = (normalizedSpeed - EXTREME_SCROLL_THRESHOLD) / (1 - EXTREME_SCROLL_THRESHOLD);
+            playbackSpeed = 2 + extremeFactor * 2; // Fade toward 4x
+        }
+        
+        playbackSpeed = Math.min(MAX_PLAYBACK_RATE, Math.max(0, playbackSpeed));
+        return rawScrollSpeed > 0 ? playbackSpeed : -playbackSpeed;
+    }
+
+    // Calculate scroll speed from scroll history
+    let smoothedScrollSpeed = 0;
+    function calculateScrollSpeed() {
+        const now = Date.now();
+        scrollHistory = scrollHistory.filter(event => now - event.time < SCROLL_HISTORY_WINDOW_MS);
+        
+        if (scrollHistory.length < 2) {
+            smoothedScrollSpeed = smoothedScrollSpeed * 0.9;
+            return smoothedScrollSpeed;
+        }
+        
+        // Since we reset history on direction change, all events should be in the same direction
+        const firstEvent = scrollHistory[0];
+        const lastEvent = scrollHistory[scrollHistory.length - 1];
+        const totalDelta = lastEvent.cumulativeDelta;
+        const timeSpan = (lastEvent.time - firstEvent.time) / 1000;
+        
+        if (timeSpan === 0) return smoothedScrollSpeed;
+        
+        const rawSpeed = totalDelta / timeSpan;
+        smoothedScrollSpeed = smoothedScrollSpeed + SCROLL_SMOOTHING * (rawSpeed - smoothedScrollSpeed);
+        
+        return smoothedScrollSpeed;
+    }
+
+    function registerScrollActivity() {
+        if (scrollSessionStartTime === null) {
+            scrollSessionStartTime = Date.now();
+        }
+        if (decayTimeout) {
+            clearTimeout(decayTimeout);
+            decayTimeout = null;
+        }
+        if (decayIntervalHandle) {
+            clearInterval(decayIntervalHandle);
+            decayIntervalHandle = null;
+        }
+        if (scrollDecayStartTimeout) {
+            clearTimeout(scrollDecayStartTimeout);
+            scrollDecayStartTimeout = null;
+        }
+    }
+
+    function scheduleScrollDecayAfterInactivity() {
+        if (scrollDecayStartTimeout) {
+            clearTimeout(scrollDecayStartTimeout);
+        }
+        
+        scrollDecayStartTimeout = setTimeout(() => {
+            const now = Date.now();
+            const sessionDuration = scrollSessionStartTime ? now - scrollSessionStartTime : 0;
+            scrollSessionStartTime = null;
+            scrollDecayStartTimeout = null;
+            
+            const normalizedDuration = Math.min(1, sessionDuration / SCROLL_DECAY_MAX_SESSION_MS);
+            const decayDelay = SCROLL_DECAY_MIN_DELAY_MS + 
+                normalizedDuration * (SCROLL_DECAY_MAX_DELAY_MS - SCROLL_DECAY_MIN_DELAY_MS);
+            
+            startDecayToDefault(decayDelay);
+        }, SCROLL_STOP_DEBOUNCE_MS);
+    }
+
     function detectTap(x, y) {
         const now = Date.now();
         
@@ -233,10 +355,14 @@ const uploadForm = document.getElementById('uploadForm');
         return false;
     }
 
-    function startDecayToDefault() {
+    function startDecayToDefault(customDelay = GESTURE_TIMEOUT_MS) {
         // Clear any existing decay timeout
         if (decayTimeout) {
             clearTimeout(decayTimeout);
+        }
+        if (decayIntervalHandle) {
+            clearInterval(decayIntervalHandle);
+            decayIntervalHandle = null;
         }
         
         decayTimeout = setTimeout(() => {
@@ -244,42 +370,38 @@ const uploadForm = document.getElementById('uploadForm');
             
             // Instead of instantly setting speedTarget, gradually decay it
             decayInterval = setInterval(() => {
-                // If in rewind mode, decay toward forward mode first
+                let nextTarget = speedTarget;
+                
                 if (speedTarget < 0) {
-                    // Gradually move from negative to DEFAULT_DECAY_SPEED
                     const decayStep = 0.05; // How much to change per tick
-                    speedTarget = Math.min(DEFAULT_DECAY_SPEED, speedTarget + decayStep);
+                    nextTarget = Math.min(DEFAULT_DECAY_SPEED, speedTarget + decayStep);
                 } else if (speedTarget > DEFAULT_DECAY_SPEED) {
-                    // Gradually slow down from fast to DEFAULT_DECAY_SPEED
                     const decayStep = 0.02; // Slower decay for forward speeds
-                    speedTarget = Math.max(DEFAULT_DECAY_SPEED, speedTarget - decayStep);
+                    nextTarget = Math.max(DEFAULT_DECAY_SPEED, speedTarget - decayStep);
                 } else if (speedTarget < DEFAULT_DECAY_SPEED) {
-                    // Gradually speed up from slow to DEFAULT_DECAY_SPEED
                     const decayStep = 0.02;
-                    speedTarget = Math.min(DEFAULT_DECAY_SPEED, speedTarget + decayStep);
+                    nextTarget = Math.min(DEFAULT_DECAY_SPEED, speedTarget + decayStep);
                 } else {
-                    // Already at default speed, stop decaying
                     clearInterval(decayInterval);
+                    decayIntervalHandle = null;
                 }
                 
-                // Check if we've reached the target
-                if (Math.abs(speedTarget - DEFAULT_DECAY_SPEED) < 0.01) {
-                    speedTarget = DEFAULT_DECAY_SPEED;
+                if (Math.abs(nextTarget - DEFAULT_DECAY_SPEED) < 0.01) {
+                    nextTarget = DEFAULT_DECAY_SPEED;
                     clearInterval(decayInterval);
+                    decayIntervalHandle = null;
                 }
                 
-                // Update slider WITHOUT updating label (label updates via leaky integrator)
-                if (speedSlider) {
-                    speedSlider.value = speedTarget;
-                }
+                setTargetSpeed(nextTarget);
                 
             }, 100); // Update every 100ms for smooth decay
+            decayIntervalHandle = decayInterval;
             
             // Reset gesture mode
             gestureMode = null;
             circleDirection = null;
             
-        }, GESTURE_TIMEOUT_MS);
+        }, customDelay);
     }
 
     // Touchscreen control function (touch only maybe???, mouse works like touch control anyway)
@@ -315,13 +437,8 @@ const uploadForm = document.getElementById('uploadForm');
             if (direction === 'counterclockwise' && 
                 (previousGestureMode !== 'circle' || previousCircleDirection !== 'counterclockwise')) {
                 // First time entering counter-clockwise mode - jump to -1x immediately (1 circle/sec baseline)
-                speedTarget = -1.0;
+                setTargetSpeed(-1.0);
                 speedActual = -1.0; // Set actual speed too, bypassing the integrator
-                
-                if (speedSlider) {
-                    speedSlider.value = speedTarget;
-                }
-                setSpeedLabel(speedTarget);
                 setActualSpeedLabel(speedActual);
             }
             
@@ -329,13 +446,8 @@ const uploadForm = document.getElementById('uploadForm');
             if (direction === 'clockwise' && 
                 (previousGestureMode !== 'circle' || previousCircleDirection !== 'clockwise')) {
                 // First time entering clockwise mode - jump to 1x immediately (1 circle/sec baseline)
-                speedTarget = 1.0;
+                setTargetSpeed(1.0);
                 speedActual = 1.0; // Set actual speed too, bypassing the integrator
-                
-                if (speedSlider) {
-                    speedSlider.value = speedTarget;
-                }
-                setSpeedLabel(speedTarget);
                 setActualSpeedLabel(speedActual);
             }
             
@@ -349,28 +461,16 @@ const uploadForm = document.getElementById('uploadForm');
             if (now - lastCircleUpdateTime > CIRCLE_UPDATE_INTERVAL_MS) {
                 const circleSpeed = calculateCircleSpeed();
                 const rewindSpeed = circleSpeedToRewindSpeed(circleSpeed);
-                speedTarget = rewindSpeed;
+                setTargetSpeed(rewindSpeed);
                 lastCircleUpdateTime = now;
-                
-                // Update slider and labels
-                if (speedSlider) {
-                    speedSlider.value = speedTarget;
-                }
-                setSpeedLabel(speedTarget);
             }
         } else if (gestureMode === 'circle' && circleDirection === 'clockwise') {
             // Clockwise - forward gesture
             if (now - lastCircleUpdateTime > CIRCLE_UPDATE_INTERVAL_MS) {
                 const circleSpeed = calculateCircleSpeed();
                 const forwardSpeed = circleSpeedToForwardSpeed(circleSpeed);
-                speedTarget = forwardSpeed;
+                setTargetSpeed(forwardSpeed);
                 lastCircleUpdateTime = now;
-                
-                // Update slider and labels
-                if (speedSlider) {
-                    speedSlider.value = speedTarget;
-                }
-                setSpeedLabel(speedTarget);
             }
         }
         
@@ -402,27 +502,47 @@ const uploadForm = document.getElementById('uploadForm');
     function handleTouchStart(event) {
         isTouching = true;
         
-        // Reset gesture tracking
-        touchPoints = [];
-        gestureMode = null;
-        circleDirection = null;
-        smoothedCircleSpeed = 0; // ← ADD THIS: Reset smoothed circle speed
-        
-        // Just record the initial touch point
-        event.preventDefault();
         const rect = touchControlArea.getBoundingClientRect();
         const x = (event.type.includes('touch') ? event.touches[0].clientX : event.clientX) - rect.left;
         const y = (event.type.includes('touch') ? event.touches[0].clientY : event.clientY) - rect.top;
         const now = Date.now();
         
-        touchPoints.push({ x, y, time: now });
-        
-        // Show indicator at touch position
-        if (touchIndicator) {
-            touchIndicator.classList.add('active');
-            touchIndicator.style.left = `${x - 30}px`;
-            touchIndicator.style.top = `${y - 30}px`;
-            touchIndicator.style.background = 'rgba(255, 255, 255, 0.8)'; // White default
+        if (inputMode === 'scroll') {
+            // In scroll mode, track vertical touch movement
+            event.preventDefault();
+            touchScrollStartY = y;
+            touchScrollStartTime = now;
+            touchScrollLastY = y;
+            touchScrollLastTime = now;
+            scrollHistory = [];
+            smoothedScrollSpeed = 0;
+            currentScrollDirection = null; // Reset direction on new touch
+            
+            // Show indicator at touch position
+            if (touchIndicator) {
+                touchIndicator.classList.add('active');
+                touchIndicator.style.left = `${x - 30}px`;
+                touchIndicator.style.top = `${y - 30}px`;
+                touchIndicator.style.background = 'rgba(255, 255, 255, 0.8)';
+            }
+        } else {
+            // In tap mode, use existing gesture tracking
+            // Reset gesture tracking
+            touchPoints = [];
+            gestureMode = null;
+            circleDirection = null;
+            smoothedCircleSpeed = 0;
+            
+            event.preventDefault();
+            touchPoints.push({ x, y, time: now });
+            
+            // Show indicator at touch position
+            if (touchIndicator) {
+                touchIndicator.classList.add('active');
+                touchIndicator.style.left = `${x - 30}px`;
+                touchIndicator.style.top = `${y - 30}px`;
+                touchIndicator.style.background = 'rgba(255, 255, 255, 0.8)'; // White default
+            }
         }
         
         // Start decay timer on touch down (resets on gesture detected)
@@ -437,7 +557,85 @@ const uploadForm = document.getElementById('uploadForm');
                 decayTimeout = null;
             }
             
-            handleTouchControl(event);
+            if (inputMode === 'tap') {
+                handleTouchControl(event);
+            } else if (inputMode === 'scroll') {
+                // Handle touch-based scrolling for mobile
+                event.preventDefault();
+                const rect = touchControlArea.getBoundingClientRect();
+                const y = (event.type.includes('touch') ? event.touches[0].clientY : event.clientY) - rect.top;
+                const now = Date.now();
+                
+                if (touchScrollLastY !== null && touchScrollLastTime !== null) {
+                    const deltaY = touchScrollLastY - y; // Positive = scrolling up, Negative = scrolling down
+                    const deltaTime = now - touchScrollLastTime;
+                    
+                    if (deltaTime > 0) {
+                        registerScrollActivity();
+                        // Convert to pixels per second (invert deltaY so positive = scroll down)
+                        const normalizedDelta = -deltaY; // Now positive = scroll down, negative = scroll up
+                        
+                        // Detect scroll direction (matching wheel event convention)
+                        const newDirection = normalizedDelta > 0 ? 'down' : 'up';
+                        
+                        // If direction changed, reset scroll history to start fresh
+                        if (currentScrollDirection !== null && currentScrollDirection !== newDirection) {
+                            scrollHistory = [];
+                            smoothedScrollSpeed = 0; // Reset smoothed speed when direction changes
+                        }
+                        
+                        currentScrollDirection = newDirection;
+                        
+                        // Track cumulative scroll
+                        let cumulativeDelta = normalizedDelta;
+                        if (scrollHistory.length > 0) {
+                            cumulativeDelta = scrollHistory[scrollHistory.length - 1].cumulativeDelta + normalizedDelta;
+                        }
+                        
+                        scrollHistory.push({
+                            time: now,
+                            delta: normalizedDelta,
+                            cumulativeDelta: cumulativeDelta
+                        });
+                        
+                        // Update scroll speed calculation
+                        if (now - lastScrollUpdateTime > SCROLL_UPDATE_INTERVAL_MS) {
+                            const calculatedSpeed = calculateScrollSpeed();
+                            const playbackSpeed = scrollSpeedToPlaybackSpeed(calculatedSpeed);
+                            
+                            setTargetSpeed(playbackSpeed);
+                            lastScrollUpdateTime = now;
+                            
+                            // Update indicator color based on direction
+                            if (touchIndicator) {
+                                const indicatorY = Math.max(0, Math.min(rect.height - 60, y - 30));
+                                touchIndicator.style.top = `${indicatorY}px`;
+                                
+                                if (playbackSpeed > 0) {
+                                    // Forward (scroll down) - blue
+                                    const intensity = Math.abs(playbackSpeed / 2.0);
+                                    const blue = Math.floor(255 * Math.max(0.4, intensity));
+                                    touchIndicator.style.background = `rgba(100, 100, ${blue}, 0.8)`;
+                                } else if (playbackSpeed < 0) {
+                                    // Backward (scroll up) - red
+                                    const intensity = Math.abs(playbackSpeed / 2.0);
+                                    const red = Math.floor(255 * Math.max(0.4, intensity));
+                                    touchIndicator.style.background = `rgba(${red}, 100, 100, 0.8)`;
+                                } else {
+                                    touchIndicator.style.background = 'rgba(255, 255, 255, 0.8)';
+                                }
+                            }
+                            
+                            lastGestureTime = now;
+                        }
+                    }
+                }
+                
+                touchScrollLastY = y;
+                touchScrollLastTime = now;
+                
+                scheduleScrollDecayAfterInactivity();
+            }
         }
     }
 
@@ -446,42 +644,48 @@ const uploadForm = document.getElementById('uploadForm');
         
         const now = Date.now();
         
-        // Check if this was a tap gesture (quick touch and release)
-        if (touchPoints.length > 0) {
-            const firstPoint = touchPoints[0];
-            const lastPoint = touchPoints[touchPoints.length - 1];
-            const distance = Math.sqrt(
-                Math.pow(lastPoint.x - firstPoint.x, 2) + 
-                Math.pow(lastPoint.y - firstPoint.y, 2)
-            );
-            
-            const touchDuration = now - firstPoint.time;
-            
-            // Only count as tap if:
-            // 1. Small movement (< 30px)
-            // 2. Quick release (< 200ms) - this prevents press-and-hold
-            // 3. Not too many touch points (< 5) - prevents drag from being counted
-            if (distance < 30 && touchDuration < 200 && touchPoints.length < 5) {
-                // Clear decay timeout for tap gesture
-                if (decayTimeout) {
-                    clearTimeout(decayTimeout);
-                    decayTimeout = null;
-                }
+        // Reset touch scroll tracking
+        if (inputMode === 'scroll') {
+            touchScrollStartY = null;
+            touchScrollStartTime = null;
+            touchScrollLastY = null;
+            touchScrollLastTime = null;
+            currentScrollDirection = null; // Reset direction on touch end
+        }
+        
+        // Only process tap gestures in tap mode
+        if (inputMode === 'tap') {
+            // Check if this was a tap gesture (quick touch and release)
+            if (touchPoints.length > 0) {
+                const firstPoint = touchPoints[0];
+                const lastPoint = touchPoints[touchPoints.length - 1];
+                const distance = Math.sqrt(
+                    Math.pow(lastPoint.x - firstPoint.x, 2) + 
+                    Math.pow(lastPoint.y - firstPoint.y, 2)
+                );
                 
-                gestureMode = 'tap';
-                tapTimes.push(now);
+                const touchDuration = now - firstPoint.time;
                 
-                // Calculate BPM from taps
-                const bpm = calculateBPMFromTaps();
-                if (bpm) {
-                    const speed = bpmToSpeed(bpm);
-                    speedTarget = speed;
-                    
-                    // Update slider and labels
-                    if (speedSlider) {
-                        speedSlider.value = speedTarget;
+                // Only count as tap if:
+                // 1. Small movement (< 30px)
+                // 2. Quick release (< 200ms) - this prevents press-and-hold
+                // 3. Not too many touch points (< 5) - prevents drag from being counted
+                if (distance < 30 && touchDuration < 200 && touchPoints.length < 5) {
+                    // Clear decay timeout for tap gesture
+                    if (decayTimeout) {
+                        clearTimeout(decayTimeout);
+                        decayTimeout = null;
                     }
-                    setSpeedLabel(speedTarget);
+                    
+                    gestureMode = 'tap';
+                    tapTimes.push(now);
+                    
+                    // Calculate BPM from taps
+                    const bpm = calculateBPMFromTaps();
+                    if (bpm) {
+                    const speed = bpmToSpeed(bpm);
+                    setTargetSpeed(speed);
+                    }
                 }
             }
         }
@@ -494,8 +698,83 @@ const uploadForm = document.getElementById('uploadForm');
             touchIndicator.style.background = 'rgba(255, 255, 255, 0.8)'; // Reset color
         }
         
-        // Restart decay timer on touch end
-        startDecayToDefault();
+        // Restart decay timer on touch end only for tap mode (scroll should hold its value)
+        if (inputMode === 'tap') {
+            startDecayToDefault();
+        }
+    }
+
+    // Handle scroll events for scroll mode
+    function handleScroll(event) {
+        if (inputMode !== 'scroll') return;
+        
+        event.preventDefault();
+
+        const now = Date.now();
+        const deltaY = event.deltaY; // Positive = scroll down, Negative = scroll up
+        if (deltaY === 0) return;
+        
+        registerScrollActivity();
+        
+        // Detect scroll direction
+        const newDirection = deltaY > 0 ? 'down' : 'up';
+        
+        // If direction changed, reset scroll history to start fresh
+        if (currentScrollDirection !== null && currentScrollDirection !== newDirection) {
+            scrollHistory = [];
+            smoothedScrollSpeed = 0; // Reset smoothed speed when direction changes
+        }
+        
+        currentScrollDirection = newDirection;
+        
+        // Track cumulative scroll delta (only for same direction)
+        let cumulativeDelta = deltaY;
+        if (scrollHistory.length > 0) {
+            cumulativeDelta = scrollHistory[scrollHistory.length - 1].cumulativeDelta + deltaY;
+        }
+        
+        // Add scroll event to history
+        scrollHistory.push({
+            time: now,
+            delta: deltaY,
+            cumulativeDelta: cumulativeDelta
+        });
+        
+        // Update scroll speed calculation
+        if (now - lastScrollUpdateTime > SCROLL_UPDATE_INTERVAL_MS) {
+            const scrollSpeed = calculateScrollSpeed();
+            const playbackSpeed = scrollSpeedToPlaybackSpeed(scrollSpeed);
+            
+            setTargetSpeed(playbackSpeed);
+            lastScrollUpdateTime = now;
+            
+            // Update indicator color based on direction
+            if (touchIndicator) {
+                if (playbackSpeed > 0) {
+                    // Forward (scroll down) - blue
+                    const intensity = Math.abs(playbackSpeed / 2.0);
+                    const blue = Math.floor(255 * Math.max(0.4, intensity));
+                    touchIndicator.style.background = `rgba(100, 100, ${blue}, 0.8)`;
+                } else if (playbackSpeed < 0) {
+                    // Backward (scroll up) - red
+                    const intensity = Math.abs(playbackSpeed / 2.0);
+                    const red = Math.floor(255 * Math.max(0.4, intensity));
+                    touchIndicator.style.background = `rgba(${red}, 100, 100, 0.8)`;
+                } else {
+                    touchIndicator.style.background = 'rgba(255, 255, 255, 0.8)';
+                }
+            }
+            
+            // Clear decay timeout when scrolling
+            if (decayTimeout) {
+                clearTimeout(decayTimeout);
+                decayTimeout = null;
+            }
+            
+            lastGestureTime = now;
+        }
+        
+        scheduleScrollDecayAfterInactivity();
     }
     //Touch control function ends here, Event Listeners below near bottom
     //Audiobook functions start here
@@ -509,6 +788,27 @@ const uploadForm = document.getElementById('uploadForm');
     function setActualSpeedLabel(v) {
         const actualSpeedLabel = document.getElementById('actual-speed-label');
         if (actualSpeedLabel) actualSpeedLabel.textContent = `${v.toFixed(2)}x`;
+    }
+
+    function clampSpeed(value) {
+        const min = parseFloat(speedSlider?.min || '-4');
+        const max = parseFloat(speedSlider?.max || '4');
+        return Math.max(min, Math.min(max, value));
+    }
+
+    function syncSpeedTargetUI() {
+        if (speedSlider) {
+            speedSlider.value = speedTarget;
+        }
+        setSpeedLabel(speedTarget);
+    }
+
+    function setTargetSpeed(value, options = {}) {
+        const { syncSlider = true } = options;
+        speedTarget = clampSpeed(value);
+        if (syncSlider) {
+            syncSpeedTargetUI();
+        }
     }
 
     //timestamp and progress bar
@@ -763,13 +1063,10 @@ const uploadForm = document.getElementById('uploadForm');
         const executeRewind = () => {
             if (!audio || audio.currentTime <= 0) {
                 stopContinuousRewind();
-                if (speedSlider) {
-                    speedSlider.value = '1';
-                    speedTarget = 1.0;
-                    speedActual = 1.0;
-                    setSpeedLabel(1);
-                    if (audio) audio.playbackRate = 1;
-                }
+                setTargetSpeed(1.0);
+                speedActual = 1.0;
+                setActualSpeedLabel(speedActual);
+                if (audio) audio.playbackRate = 1;
                 updateParameterLabels();
                 return;
             }
@@ -904,9 +1201,7 @@ const uploadForm = document.getElementById('uploadForm');
         
         // Set speed to default when pressing play (if paused)
         if (audio.paused) {
-            speedTarget = 1.0
-            if (speedSlider) speedSlider.value = speedTarget;
-            setSpeedLabel(speedTarget);
+            setTargetSpeed(1.0);
             startDecayToDefault();
         }
         
@@ -948,8 +1243,8 @@ const uploadForm = document.getElementById('uploadForm');
     });
 
     speedSlider?.addEventListener('input', () => {
-        speedTarget = parseFloat(speedSlider.value || '1');
-        setSpeedLabel(speedTarget); // Update target label immediately
+        const sliderValue = parseFloat(speedSlider.value || '1');
+        setTargetSpeed(sliderValue);
         updateIntegratorDisplay(); // Update display slider immediately
     });
 
@@ -967,6 +1262,43 @@ const uploadForm = document.getElementById('uploadForm');
 
     baseBPMInput?.addEventListener('input', updateParameterLabels);
 
+    // Function to update UI labels based on input mode
+    function updateInputModeLabels() {
+        if (inputMode === 'scroll') {
+            if (inputModeLabel) inputModeLabel.textContent = 'Scrolling';
+            if (leftZoneLabel) leftZoneLabel.textContent = 'Up to Rewind ⬆️';
+            if (rightZoneLabel) rightZoneLabel.textContent = 'Down for Forward ⬇️';
+        } else {
+            if (inputModeLabel) inputModeLabel.textContent = 'Tapping';
+            if (leftZoneLabel) leftZoneLabel.textContent = 'Circles to Rewind 🔄';
+            if (rightZoneLabel) rightZoneLabel.textContent = 'Tap for Forward';
+        }
+    }
+
+    // Toggle input mode
+    if (inputModeToggle) {
+        inputModeToggle.addEventListener('change', (event) => {
+            inputMode = event.target.checked ? 'scroll' : 'tap';
+            updateInputModeLabels();
+            
+            // Reset gesture state when switching modes
+            touchPoints = [];
+            scrollHistory = [];
+            gestureMode = null;
+            circleDirection = null;
+            smoothedCircleSpeed = 0;
+            smoothedScrollSpeed = 0;
+            scrollSessionStartTime = null;
+            if (scrollDecayStartTimeout) {
+                clearTimeout(scrollDecayStartTimeout);
+                scrollDecayStartTimeout = null;
+            }
+            
+            // Reset speed to default when switching modes
+            setTargetSpeed(DEFAULT_DECAY_SPEED);
+        });
+    }
+
     // Touchscreen control zone event listeners
     if (touchControlArea) {
         // Mouse events
@@ -980,6 +1312,9 @@ const uploadForm = document.getElementById('uploadForm');
         touchControlArea.addEventListener('touchmove', handleTouchMove);
         touchControlArea.addEventListener('touchend', handleTouchEnd);
         touchControlArea.addEventListener('touchcancel', handleTouchEnd);
+        
+        // Scroll events (wheel) for scroll mode
+        touchControlArea.addEventListener('wheel', handleScroll, { passive: false });
     }
 
 
@@ -987,6 +1322,7 @@ const uploadForm = document.getElementById('uploadForm');
     setSpeedLabel(speedTarget); // Show target value
     setActualSpeedLabel(speedActual); // Show actual value
     updateParameterLabels();
+    updateInputModeLabels(); // Initialize input mode labels
     loadDefaultTrack();
     startSpeedIntegrator(); // Start the leaky integrator
 

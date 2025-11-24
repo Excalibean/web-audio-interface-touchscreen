@@ -23,9 +23,19 @@
             
             <!-- Touchscreen Control Zone -->
             <div id="touchscreen-zone">
+                <div id="input-mode-toggle-container">
+                    <label for="input-mode-toggle">
+                        <span>Input Mode: </span>
+                        <span id="input-mode-label">Tapping</span>
+                    </label>
+                    <label class="switch">
+                        <input type="checkbox" id="input-mode-toggle">
+                        <span class="slider"></span>
+                    </label>
+                </div>
                 <div id="touch-control-area">
-                    <div class="zone-label left-label">Circles to Rewind 🔄</div>
-                    <div class="zone-label right-label">Tap for Forward</div>
+                    <div class="zone-label left-label" id="left-zone-label">Circles to Rewind 🔄</div>
+                    <div class="zone-label right-label" id="right-zone-label">Tap for Forward</div>
                     <div id="touch-indicator"></div>
                 </div>
                 <div id="zone-speed-display">
@@ -37,7 +47,7 @@
             <!-- Traditional Controls (kept for reference) -->
             <div id="controls">
                 <label>Input Speed:</label>
-                <input type="range" id="speed-slider" min="-2.0" max="4.0" step="0.01" value="1">
+                <input type="range" id="speed-slider" min="-4.0" max="4.0" step="0.01" value="1">
                 <label>Actual Speed:</label>
                 <input type="range" id="actual-speed-display" min="-4.0" max="4.0" step="0.01" value="1" disabled>
             </div>
