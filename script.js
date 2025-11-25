@@ -30,10 +30,11 @@ const uploadForm = document.getElementById('uploadForm');
     const leftZoneLabel = document.getElementById('left-zone-label');
     const rightZoneLabel = document.getElementById('right-zone-label');
 
-    //TO DO: Add alpha, decay timeout, refine gestures, and integrate forward circle/swiping gestures
+    //TO DO: Add alpha, remove decay timeout, refine gestures
     // Use, take notes, and debug session (simulate user experience)
     // Speed = Speed - alpha * (Speed - Target)
-    // Target = Amplitude * Gesture
+    // Target = Amplitude * Gesture (Implement this, speed multiplier)
+    // Fix circling to use radius for speed control
     // 
 
     let audio = null;
