@@ -11,12 +11,12 @@ body {
 
 html, body {
     margin: 0;
-    padding: 5;
+    padding: 0; 
     height: 100%;
     width: 100%;
     display: flex;
-    justify-content: center; /* Center horizontally */
-    align-items: center;     /* Center vertically */
+    justify-content: center;
+    align-items: center;
 }
 
 header {
@@ -236,14 +236,14 @@ input:checked + .slider:before {
 p{
     margin: 0;
     font-weight: normal;
-    font-size: 1.2e;
+    font-size: 1.2em; 
     color: black
 }
 
 h2 {
     margin: 0;
     font-weight: normal;
-    font-size: 2e;
+    font-size: 2em; 
     color: black
 }
 
