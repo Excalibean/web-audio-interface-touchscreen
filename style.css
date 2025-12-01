@@ -1,22 +1,17 @@
+html {
+    height: 100%;
+    width: 100%;
+}
+
 body {
     font: 80% system-ui, sans-serif;
     display: flex;
-    flex-flow: column;
+    flex-direction: column;
     max-width: 80em;
     min-height: 100vh;
     box-sizing: border-box;
-    margin: auto;
+    margin: 0 auto; /* Center horizontally */
     padding: 1em;
-}
-
-html, body {
-    margin: 0;
-    padding: 0; 
-    height: 100%;
-    width: 100%;
-    display: flex;
-    justify-content: center;
-    align-items: center;
 }
 
 header {
@@ -237,14 +232,14 @@ p{
     margin: 0;
     font-weight: normal;
     font-size: 1.2em; 
-    color: black
+    color: black;
 }
 
 h2 {
     margin: 0;
     font-weight: normal;
     font-size: 2em; 
-    color: black
+    color: black;
 }
 
 /* ===== PROGRESS BAR ===== */
