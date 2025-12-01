@@ -98,19 +98,64 @@ header {
     display: block;
 }
 
+/* Remove the old zone-speed-display since we're moving it */
 #zone-speed-display {
-    display: flex;
-    justify-content: space-around;
-    margin-top: 1em;
-    font-size: 1.2em;
-    font-weight: bold;
-    color: #333;
+    display: none;
 }
 
-#zone-speed-display span {
-    padding: 0.5em 1em;
+/* Add this after the #touchscreen-zone rule (around line 40) */
+
+#touch-and-controls-container {
+    display: flex;
+    gap: 2em;
+    align-items: flex-start;
+    margin-top: 1em;
+}
+
+#touch-control-wrapper {
+    flex: 2;
+    min-width: 300px;
+}
+
+#gesture-parameters {
+    flex: 1;
+    min-width: 250px;
+    padding: 1em;
     background: white;
     border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+#gesture-parameters h3 {
+    margin: 0 0 1em 0;
+    font-size: 1.1em;
+    color: #333;
+    border-bottom: 2px solid #4CAF50;
+    padding-bottom: 0.5em;
+}
+
+.param-group {
+    margin-bottom: 1em;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3em;
+}
+
+.param-group label {
+    font-weight: 500;
+    color: #555;
+    font-size: 0.9em;
+}
+
+.param-group input[type="range"],
+.param-group input[type="number"] {
+    width: 100%;
+}
+
+.param-group span {
+    font-weight: bold;
+    color: #4CAF50;
+    font-size: 1.5em;
 }
 
 /* Input Mode Toggle */
@@ -242,6 +287,19 @@ h2 {
 
 #progress-bar::-webkit-slider-thumb:active {
     transform: scale(1.05);
+}
+
+/* Responsive: stack on smaller screens */
+@media (max-width: 768px) {
+    #touch-and-controls-container {
+        flex-direction: column;
+    }
+    
+    #touch-control-wrapper,
+    #gesture-parameters {
+        width: 100%;
+        min-width: 0;
+    }
 }
 
 

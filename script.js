@@ -18,6 +18,8 @@ const uploadForm = document.getElementById('uploadForm');
     const rewindPlaybackSpeedLabel = document.getElementById('rewind-playback-speed-label');
     const baseBPMInput = document.getElementById('1x-bpm');
     const baseBPMLabel = document.getElementById('1x-bpm-label');
+    const gestureAmplitudeInput = document.getElementById('gesture-amplitude');
+    const gestureAmplitudeLabel = document.getElementById('gesture-amplitude-label');
     const progressBar = document.getElementById('progress-bar');
     const currentTimeDisplay = document.getElementById('current-time');
     const durationTimeDisplay = document.getElementById('duration-time');
@@ -33,8 +35,8 @@ const uploadForm = document.getElementById('uploadForm');
     //TO DO: Add alpha, remove decay timeout, refine gestures
     // Use, take notes, and debug session (simulate user experience)
     // Speed = Speed - alpha * (Speed - Target)
-    // Target = Amplitude * Gesture (Implement this, speed multiplier)
-    // Fix circling to use radius for speed control
+    // Target = Amplitude * Gesture (Implement this, speed multiplier) (done)
+    // Fix circling to use radius for speed control (done)
     // 
 
     let audio = null;
@@ -80,13 +82,14 @@ const uploadForm = document.getElementById('uploadForm');
     let tapCount = 0;
     let tapTimes = []; // Store timestamps of recent taps
     const TAP_WINDOW_MS = 2000; // Consider taps within 2 seconds for BPM calculation
-    const CIRCLE_POINTS_NEEDED = 10; // Number of points needed to detect a circle
-    const CIRCLE_UPDATE_POINTS = 5; // Update circle speed more frequently
+    const CIRCLE_POINTS_NEEDED = 7; // Number of points needed to detect a circle
+    const CIRCLE_UPDATE_POINTS = 5; // Reduced from 30
     let gestureMode = null; // 'tap' or 'circle' or null
     let circleDirection = null; // 'clockwise' or 'counterclockwise'
     let lastGestureTime = 0;
     const GESTURE_TIMEOUT_MS = 3000; // If no gesture for 1 second, decay to default
     const DEFAULT_DECAY_SPEED = 0.5; // Speed to decay to when no input
+    let lastValidCircleSpeed = 0;
     let decayTimeout = null;
     let decayIntervalHandle = null;
     let lastCircleUpdateTime = 0; // Track when we last updated circle speed
@@ -109,14 +112,19 @@ const uploadForm = document.getElementById('uploadForm');
     function detectCircleGesture() {
         if (touchPoints.length < CIRCLE_POINTS_NEEDED) return null;
         
-        // Use the last N points to detect circular motion
-        const recentPoints = touchPoints.slice(-CIRCLE_POINTS_NEEDED);
-        let totalAngleChange = 0;
+        // Use more points for more stable direction detection
+        const recentPoints = touchPoints.slice(-Math.min(15, touchPoints.length)); // Increased from 10
         
-        // Calculate cumulative angle changes
-        for (let i = 2; i < recentPoints.length; i++) {
-            const angle1 = calculateAngle(recentPoints[i-2], recentPoints[i-1]);
-            const angle2 = calculateAngle(recentPoints[i-1], recentPoints[i]);
+        // Calculate centroid for direction detection
+        const centerX = recentPoints.reduce((sum, p) => sum + p.x, 0) / recentPoints.length;
+        const centerY = recentPoints.reduce((sum, p) => sum + p.y, 0) / recentPoints.length;
+        
+        // Calculate total angular displacement around centroid
+        let totalAngleChange = 0;
+        for (let i = 1; i < recentPoints.length; i++) {
+            const angle1 = Math.atan2(recentPoints[i-1].y - centerY, recentPoints[i-1].x - centerX);
+            const angle2 = Math.atan2(recentPoints[i].y - centerY, recentPoints[i].x - centerX);
+            
             let angleDiff = angle2 - angle1;
             
             // Normalize angle difference to -PI to PI
@@ -126,54 +134,102 @@ const uploadForm = document.getElementById('uploadForm');
             totalAngleChange += angleDiff;
         }
         
-        // Determine if it's a circle and which direction
-        const threshold = Math.PI / 2; // Need at least 90 degrees of rotation
+        // Much stronger hysteresis to prevent direction flipping
+        const initialThreshold = Math.PI / 2; // 90 degrees for first detection
+        const continuationThreshold = Math.PI / 12; // 15 degrees to continue (reduced from 22.5)
         
+        // Apply hysteresis: once locked into a direction, stick with it
+        const threshold = circleDirection ? continuationThreshold : initialThreshold;
+        
+        // ONLY allow direction change if there's a STRONG reversal (full 90 degrees)
+        if (circleDirection === 'clockwise' && totalAngleChange < -Math.PI / 2) {
+            // Strong counter-clockwise movement detected, allow switch
+            return 'counterclockwise';
+        } else if (circleDirection === 'counterclockwise' && totalAngleChange > Math.PI / 2) {
+            // Strong clockwise movement detected, allow switch
+            return 'clockwise';
+        }
+        
+        // Otherwise, use normal threshold detection
         if (totalAngleChange > threshold) {
             return 'clockwise';
         } else if (totalAngleChange < -threshold) {
             return 'counterclockwise';
         }
         
-        return null;
+        // If we already have a direction, ALWAYS keep it unless strong reversal
+        return circleDirection;
     }
 
-    let smoothedCircleSpeed = 0;
-    const CIRCLE_SPEED_SMOOTHING = 0.3; // 0-1, lower = smoother (like your speed filter!)
-
     function calculateCircleSpeed() {
-        // Calculate how fast circles are being drawn
-        if (touchPoints.length < CIRCLE_UPDATE_POINTS) return smoothedCircleSpeed;
+        // Radius-based calculation - more stable than angles
+        if (touchPoints.length < 5) return 0;
         
-        const recentPoints = touchPoints.slice(-CIRCLE_UPDATE_POINTS);
-        const timeSpan = (recentPoints[recentPoints.length - 1].time - recentPoints[0].time) / 1000; // in seconds
+        // Use adaptive point count - more points = better accuracy
+        const pointsToUse = Math.min(20, Math.max(5, touchPoints.length));
+        const recentPoints = touchPoints.slice(-pointsToUse);
+        const timeSpan = (recentPoints[recentPoints.length - 1].time - recentPoints[0].time) / 1000;
         
-        if (timeSpan === 0) return smoothedCircleSpeed;
+        // Reduced minimum time requirement for slow circles
+        if (timeSpan < 0.05 || timeSpan === 0) return 0; // Changed from 0.08 to 0.05
         
-        // Calculate total angle change in the recent points
-        let totalAngleChange = 0;
-        for (let i = 2; i < recentPoints.length; i++) {
-            const angle1 = calculateAngle(recentPoints[i-2], recentPoints[i-1]);
-            const angle2 = calculateAngle(recentPoints[i-1], recentPoints[i]);
-            let angleDiff = angle2 - angle1;
-            
-            // Normalize angle difference to -PI to PI
-            while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
-            while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
-            
-            totalAngleChange += Math.abs(angleDiff);
+        // Calculate centroid (center of mass of all touch points)
+        const centerX = recentPoints.reduce((sum, p) => sum + p.x, 0) / recentPoints.length;
+        const centerY = recentPoints.reduce((sum, p) => sum + p.y, 0) / recentPoints.length;
+        
+        // Calculate average radius from centroid
+        let totalRadius = 0;
+        for (const point of recentPoints) {
+            const dx = point.x - centerX;
+            const dy = point.y - centerY;
+            totalRadius += Math.sqrt(dx * dx + dy * dy);
+        }
+        const avgRadius = totalRadius / recentPoints.length;
+        
+        // Reject circles that are too small or too large
+        if (avgRadius < 10 || avgRadius > 300) {
+            return 0; 
         }
         
-        // Calculate angular velocity (radians per second)
-        const angularVelocity = totalAngleChange / timeSpan;
+        // Calculate total arc length traveled (distance along the circle path)
+        let totalArcLength = 0;
+        for (let i = 1; i < recentPoints.length; i++) {
+            const dx = recentPoints[i].x - recentPoints[i-1].x;
+            const dy = recentPoints[i].y - recentPoints[i-1].y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            totalArcLength += distance;
+        }
         
-        // Convert to circles per second (2π radians = 1 circle)
-        const rawCirclesPerSecond = angularVelocity / (2 * Math.PI);
+        // Arc length per second = distance traveled / time
+        const arcLengthPerSec = totalArcLength / timeSpan;
         
-        // Apply exponential smoothing (same technique as your speed integrator!)
-        smoothedCircleSpeed = smoothedCircleSpeed + CIRCLE_SPEED_SMOOTHING * (rawCirclesPerSecond - smoothedCircleSpeed);
+        // Circumference of circle = 2πr
+        const circumference = 2 * Math.PI * avgRadius;
         
-        return smoothedCircleSpeed;
+        // Rotations per second = distance traveled / circumference
+        const rawRotationsPerSecond = arcLengthPerSec / circumference;
+        
+        // Apply radius-based scaling
+        const radiusScaleFactor = Math.sqrt(avgRadius / 80); // 80px = reference radius
+        const circleSpeed = rawRotationsPerSecond * radiusScaleFactor;
+        
+        if (circleSpeed > 0.08) { // Only update if valid
+            lastValidCircleSpeed = circleSpeed;
+        }
+        
+        // Add debug output
+        console.log('Circle calc:', {
+            points: pointsToUse,
+            timeSpan: timeSpan.toFixed(2),
+            radius: avgRadius.toFixed(0),
+            arcLength: totalArcLength.toFixed(0),
+            arcPerSec: arcLengthPerSec.toFixed(0),
+            raw: rawRotationsPerSecond.toFixed(2),
+            radiusScale: radiusScaleFactor.toFixed(2),
+            final: circleSpeed.toFixed(2)
+        });
+        
+        return circleSpeed > 0 ? circleSpeed : lastValidCircleSpeed; // Return last valid if current is 0
     }
 
     function calculateBPMFromTaps() {
@@ -198,52 +254,52 @@ const uploadForm = document.getElementById('uploadForm');
     function bpmToSpeed(bpm) {
         // Map BPM to playback speed
         // Use adjustable base BPM from slider
-        const baseBPM = parseFloat(baseBPMInput?.value || 60); // BPM that corresponds to 1x speed
-        return Math.max(0.25, Math.min(4, bpm / baseBPM));
+        const baseBPM = parseFloat(baseBPMInput?.value || 60);
+        const amplitude = parseFloat(gestureAmplitudeInput?.value || 1.0);
+        const baseSpeed = Math.max(0.25, Math.min(4, bpm / baseBPM));
+        return baseSpeed * amplitude;
     }
 
     function circleSpeedToRewindSpeed(circleSpeed) {
-        // Map circles per second directly to playback speed
-        // 1 circle/sec = -1x speed (baseline)
-        // Faster circles = faster rewind (more negative)
-        const maxCirclesPerSec = 4.0; // Maximum circles per second we'll detect
-        const maxSpeed = -4.0; // Maximum rewind speed
-        const minCirclesForRewind = 0.1; // Minimum circle speed to trigger rewind (slower than this = ignored)
+        const maxRotationsPerSec = 4.0;
+        const maxSpeed = -4.0;
+        const minRotations = 0.08;
+        const amplitude = parseFloat(gestureAmplitudeInput?.value || 1.0);
         
-        // Clamp circle speed
-        const clampedSpeed = Math.max(0, Math.min(circleSpeed, maxCirclesPerSec));
-        
-        // Only apply rewind if above minimum threshold
-        if (clampedSpeed < minCirclesForRewind) {
-            return 0; // No rewind for very slow movements
+        if (!circleSpeed || isNaN(circleSpeed) || circleSpeed < minRotations) {
+            return 0;
         }
-    
-        const rewindSpeed = -clampedSpeed;
-        return Math.max(maxSpeed, rewindSpeed); // Clamp to max speed
+        
+        const mappedSpeed = (circleSpeed / maxRotationsPerSec) * Math.abs(maxSpeed);
+        const rewindSpeed = -Math.min(Math.abs(maxSpeed), mappedSpeed) * amplitude; 
+        
+        console.log(`Rewind: ${circleSpeed.toFixed(2)} rot/s × ${amplitude.toFixed(2)} → ${rewindSpeed.toFixed(2)}x`);
+        
+        return rewindSpeed;
     }
 
         function circleSpeedToForwardSpeed(circleSpeed) {
-        // Map circles per second directly to playback speed
-        // 1 circle/sec = 1x speed (baseline)
-        // Faster circles = faster forward playback (more positive)
-        const maxCirclesPerSec = 4.0; // Maximum circles per second we'll detect
-        const maxSpeed = 4.0; // Maximum forward speed
-        const minCirclesForForward = 0.1; // Minimum circle speed to trigger forward playback
-        
-        // Clamp circle speed
-        const clampedSpeed = Math.max(0, Math.min(circleSpeed, maxCirclesPerSec));
-        
-        // Only apply forward if above minimum threshold
-        if (clampedSpeed < minCirclesForForward) {
-            return 0; // No forward for very slow movements
+        const maxRotationsPerSec = 4.0;
+        const maxSpeed = 4.0;
+        const minRotations = 0.08;
+        const amplitude = parseFloat(gestureAmplitudeInput?.value || 1.0);
+
+        if (!circleSpeed || isNaN(circleSpeed) || circleSpeed < minRotations) {
+            return 0;
         }
-    
         
-        return Math.min(maxSpeed, clampedSpeed); // Clamp to max speed
+        const forwardSpeed = (circleSpeed / maxRotationsPerSec) * maxSpeed;
+        const clampedSpeed = Math.min(maxSpeed, forwardSpeed) * amplitude; // APPLY AMPLITUDE
+        
+        console.log(`Forward: ${circleSpeed.toFixed(2)} rot/s × ${amplitude.toFixed(2)} → ${clampedSpeed.toFixed(2)}x`);
+        
+        return clampedSpeed;
     }
 
     // Bell curve function to map scroll speed to playback speed
     function scrollSpeedToPlaybackSpeed(rawScrollSpeed) {
+        const amplitude = parseFloat(gestureAmplitudeInput?.value || 1.0);
+        
         const normalizedSpeed = Math.min(
             1,
             Math.abs(rawScrollSpeed) / (MAX_SCROLL_SPEED * SCROLL_SENSITIVITY_FACTOR)
@@ -254,19 +310,20 @@ const uploadForm = document.getElementById('uploadForm');
         let playbackSpeed;
         
         if (normalizedSpeed < SLOW_SCROLL_THRESHOLD) {
-            playbackSpeed = (normalizedSpeed / SLOW_SCROLL_THRESHOLD) * 0.25; // Glide toward 0x
+            playbackSpeed = (normalizedSpeed / SLOW_SCROLL_THRESHOLD) * 0.25;
         } else if (normalizedSpeed < FAST_SCROLL_THRESHOLD) {
-            // Keep most scroll speeds clustered near 1x using bell curve
-            playbackSpeed = 0.6 + bellValue * 0.6; // ≈0.6x to 1.2x
+            playbackSpeed = 0.6 + bellValue * 0.6;
         } else if (normalizedSpeed < EXTREME_SCROLL_THRESHOLD) {
             const fastFactor = (normalizedSpeed - FAST_SCROLL_THRESHOLD) / (EXTREME_SCROLL_THRESHOLD - FAST_SCROLL_THRESHOLD);
-            playbackSpeed = 1 + fastFactor; // Approach 2x as scroll accelerates
+            playbackSpeed = 1 + fastFactor;
         } else {
             const extremeFactor = (normalizedSpeed - EXTREME_SCROLL_THRESHOLD) / (1 - EXTREME_SCROLL_THRESHOLD);
-            playbackSpeed = 2 + extremeFactor * 2; // Fade toward 4x
+            playbackSpeed = 2 + extremeFactor * 2;
         }
         
         playbackSpeed = Math.min(MAX_PLAYBACK_RATE, Math.max(0, playbackSpeed));
+        playbackSpeed = playbackSpeed * amplitude; // APPLY AMPLITUDE
+        
         return rawScrollSpeed > 0 ? playbackSpeed : -playbackSpeed;
     }
 
@@ -405,7 +462,7 @@ const uploadForm = document.getElementById('uploadForm');
         }, customDelay);
     }
 
-    // Touchscreen control function (touch only maybe???, mouse works like touch control anyway)
+    // Touchscreen control function 
     function handleTouchControl(event) {
         event.preventDefault(); //to prevent accidental scrolling (very very important)
 
@@ -437,19 +494,15 @@ const uploadForm = document.getElementById('uploadForm');
             // Jump-start rewind when first entering counter-clockwise mode
             if (direction === 'counterclockwise' && 
                 (previousGestureMode !== 'circle' || previousCircleDirection !== 'counterclockwise')) {
-                // First time entering counter-clockwise mode - jump to -1x immediately (1 circle/sec baseline)
-                setTargetSpeed(-1.0);
-                speedActual = -1.0; // Set actual speed too, bypassing the integrator
-                setActualSpeedLabel(speedActual);
+                // First time entering counter-clockwise mode - set target only
+                setTargetSpeed(-0.5);
             }
             
             // Jump-start forward when first entering clockwise mode
             if (direction === 'clockwise' && 
                 (previousGestureMode !== 'circle' || previousCircleDirection !== 'clockwise')) {
-                // First time entering clockwise mode - jump to 1x immediately (1 circle/sec baseline)
-                setTargetSpeed(1.0);
-                speedActual = 1.0; // Set actual speed too, bypassing the integrator
-                setActualSpeedLabel(speedActual);
+                // First time entering clockwise mode - set target only
+                setTargetSpeed(0.5);
             }
             
             // Clear tap data when doing circles
@@ -458,19 +511,25 @@ const uploadForm = document.getElementById('uploadForm');
         
         // Continuously update circle speed if in circle mode
         if (gestureMode === 'circle' && circleDirection === 'counterclockwise') {
-            // Update speed more frequently for responsive control
             if (now - lastCircleUpdateTime > CIRCLE_UPDATE_INTERVAL_MS) {
                 const circleSpeed = calculateCircleSpeed();
                 const rewindSpeed = circleSpeedToRewindSpeed(circleSpeed);
-                setTargetSpeed(rewindSpeed);
+                
+                // Apply speed even if small (removed 0.1 threshold)
+                if (rewindSpeed !== 0) {
+                    setTargetSpeed(rewindSpeed);
+                }
                 lastCircleUpdateTime = now;
             }
         } else if (gestureMode === 'circle' && circleDirection === 'clockwise') {
-            // Clockwise - forward gesture
             if (now - lastCircleUpdateTime > CIRCLE_UPDATE_INTERVAL_MS) {
                 const circleSpeed = calculateCircleSpeed();
                 const forwardSpeed = circleSpeedToForwardSpeed(circleSpeed);
-                setTargetSpeed(forwardSpeed);
+                
+                // Apply speed even if small (removed 0.1 threshold)
+                if (forwardSpeed !== 0) {
+                    setTargetSpeed(forwardSpeed);
+                }
                 lastCircleUpdateTime = now;
             }
         }
@@ -893,7 +952,7 @@ const uploadForm = document.getElementById('uploadForm');
         if (speedIntegratorInterval) return; // Already running
         
         speedIntegratorInterval = setInterval(() => {
-            const ALPHA = parseFloat(document.getElementById('alpha')?.value || 0.02);
+            const ALPHA = parseFloat(document.getElementById('alpha')?.value || 0.1);
             // Advance speedActual toward speedTarget
             speedActual = speedActual + ALPHA * (speedTarget - speedActual); //Low Pass Filter equation
             
@@ -1263,18 +1322,39 @@ const uploadForm = document.getElementById('uploadForm');
 
     baseBPMInput?.addEventListener('input', updateParameterLabels);
 
+    gestureAmplitudeInput?.addEventListener('input', () => {
+        if (gestureAmplitudeLabel) {
+            const amplitude = parseFloat(gestureAmplitudeInput.value);
+            gestureAmplitudeLabel.textContent = `${amplitude.toFixed(2)}x`;
+        }
+    });
+
     // Function to update UI labels based on input mode
     function updateInputModeLabels() {
+        const bpmParameterGroup = document.getElementById('bpm-parameter-group');
+    
         if (inputMode === 'scroll') {
             if (inputModeLabel) inputModeLabel.textContent = 'Scrolling';
             if (leftZoneLabel) leftZoneLabel.textContent = 'Up to Rewind ⬆️';
             if (rightZoneLabel) rightZoneLabel.textContent = 'Down for Forward ⬇️';
+        
+            // Dim BPM parameter in scroll mode
+            if (bpmParameterGroup) {
+                bpmParameterGroup.style.opacity = '0.3';
+                bpmParameterGroup.style.pointerEvents = 'none'; // Disable interaction
+            }
         } else {
             if (inputModeLabel) inputModeLabel.textContent = 'Tapping/Circling';
             if (leftZoneLabel) leftZoneLabel.textContent = 'Circles Rewind/Forward 🔄';
             if (rightZoneLabel) rightZoneLabel.textContent = 'Taps Forward';
+        
+            // Restore BPM parameter in tap mode
+            if (bpmParameterGroup) {
+                bpmParameterGroup.style.opacity = '1';
+                bpmParameterGroup.style.pointerEvents = 'auto'; // Enable interaction
+                }
+            }
         }
-    }
 
     // Toggle input mode
     if (inputModeToggle) {
@@ -1320,10 +1400,13 @@ const uploadForm = document.getElementById('uploadForm');
 
 
     // Initialize
-    setSpeedLabel(speedTarget); // Show target value
-    setActualSpeedLabel(speedActual); // Show actual value
+    setSpeedLabel(speedTarget);
+    setActualSpeedLabel(speedActual);
     updateParameterLabels();
-    updateInputModeLabels(); // Initialize input mode labels
+    updateInputModeLabels();
+    if (gestureAmplitudeLabel && gestureAmplitudeInput) {
+        gestureAmplitudeLabel.textContent = `${parseFloat(gestureAmplitudeInput.value).toFixed(2)}x`;
+    }
     loadDefaultTrack();
     startSpeedIntegrator(); // Start the leaky integrator
 
