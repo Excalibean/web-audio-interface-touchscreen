@@ -153,6 +153,24 @@ header {
     font-size: 1.5em;
 }
 
+.readonly-slider {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    color: #888;
+}
+
+.param-group .readonly-slider span {
+    font-weight: 500;
+    color: #888;
+    font-size: 0.9em;
+}
+
+.param-group .readonly-slider input[disabled] {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 /* Input Mode Toggle */
 #input-mode-toggle-container {
     display: flex;

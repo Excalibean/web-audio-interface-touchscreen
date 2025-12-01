@@ -23,6 +23,9 @@ const uploadForm = document.getElementById('uploadForm');
     const progressBar = document.getElementById('progress-bar');
     const currentTimeDisplay = document.getElementById('current-time');
     const durationTimeDisplay = document.getElementById('duration-time');
+    const speedDecaySlider = document.getElementById('speed-decay-display');
+    const speedDecayLabel = document.getElementById('speed-decay-label');
+    const speedDecayGroup = document.getElementById('speed-decay-group');
     
     // Touchscreen control elements
     const touchControlArea = document.getElementById('touch-control-area');
@@ -59,14 +62,15 @@ const uploadForm = document.getElementById('uploadForm');
     const SCROLL_SMOOTHING = 0.3; // Smoothing factor for scroll speed
     const MAX_SCROLL_SPEED = 2400;
     const SCROLL_SENSITIVITY_FACTOR = 5; // Higher = requires more scrolling to reach extremes
-    const SLOW_SCROLL_THRESHOLD = 0.05;
-    const FAST_SCROLL_THRESHOLD = 0.85;
-    const EXTREME_SCROLL_THRESHOLD = 0.97;
+    const CORE_SCROLL_EASE_STRENGTH = 2.2;
+    const CORE_SCROLL_MAX_SPEED = 1.1;
+    const EXTREME_SCROLL_THRESHOLD = 0.9;
+    const SCROLL_PLAYBACK_SMOOTHING = 0.25;
     const MAX_PLAYBACK_RATE = 4;
     const SCROLL_STOP_DEBOUNCE_MS = 300;
     const SCROLL_DECAY_MIN_DELAY_MS = 2000;
     const SCROLL_DECAY_MAX_DELAY_MS = 8000;
-    const SCROLL_DECAY_MAX_SESSION_MS = 6000;
+    const SCROLL_DECAY_MAX_SESSION_MS = 2000;
     
     // Touch scroll detection (for mobile)
     let touchScrollStartY = null;
@@ -75,6 +79,10 @@ const uploadForm = document.getElementById('uploadForm');
     let touchScrollLastTime = null;
     let scrollSessionStartTime = null;
     let scrollDecayStartTimeout = null;
+    let speedDecayCountdownInterval = null;
+    let speedDecayCountdownTargetTime = null;
+    let smoothedScrollPlaybackSpeed = 1.0;
+    let lastScrollEventTime = 0;
     
     // Gesture detection variables
     let touchPoints = []; // Store touch positions for gesture detection
@@ -298,27 +306,23 @@ const uploadForm = document.getElementById('uploadForm');
 
     // Bell curve function to map scroll speed to playback speed
     function scrollSpeedToPlaybackSpeed(rawScrollSpeed) {
-        const amplitude = parseFloat(gestureAmplitudeInput?.value || 1.0);
+        if (!rawScrollSpeed) return 0;
         
+        const amplitude = parseFloat(gestureAmplitudeInput?.value || 1.0);
         const normalizedSpeed = Math.min(
             1,
             Math.abs(rawScrollSpeed) / (MAX_SCROLL_SPEED * SCROLL_SENSITIVITY_FACTOR)
         );
-        const mu = 0.5;
-        const sigma = 0.25;
-        const bellValue = Math.exp(-Math.pow((normalizedSpeed - mu) / sigma, 2) / 2);
-        let playbackSpeed;
         
-        if (normalizedSpeed < SLOW_SCROLL_THRESHOLD) {
-            playbackSpeed = (normalizedSpeed / SLOW_SCROLL_THRESHOLD) * 0.25;
-        } else if (normalizedSpeed < FAST_SCROLL_THRESHOLD) {
-            playbackSpeed = 0.6 + bellValue * 0.6;
-        } else if (normalizedSpeed < EXTREME_SCROLL_THRESHOLD) {
-            const fastFactor = (normalizedSpeed - FAST_SCROLL_THRESHOLD) / (EXTREME_SCROLL_THRESHOLD - FAST_SCROLL_THRESHOLD);
-            playbackSpeed = 1 + fastFactor;
-        } else {
-            const extremeFactor = (normalizedSpeed - EXTREME_SCROLL_THRESHOLD) / (1 - EXTREME_SCROLL_THRESHOLD);
-            playbackSpeed = 2 + extremeFactor * 2;
+        // Ease-in curve that keeps most values hovering near ±1x
+        const easedCore = Math.tanh(normalizedSpeed * CORE_SCROLL_EASE_STRENGTH); // 0 → ~0.98
+        let playbackSpeed = easedCore * CORE_SCROLL_MAX_SPEED;
+        
+        // Allow extra headroom only when pushing to the extreme
+        if (normalizedSpeed > EXTREME_SCROLL_THRESHOLD) {
+            const extremeFactor = (normalizedSpeed - EXTREME_SCROLL_THRESHOLD) / (1 - EXTREME_SCROLL_THRESHOLD); // 0→1
+            const extraSpeed = extremeFactor * (MAX_PLAYBACK_RATE - CORE_SCROLL_MAX_SPEED);
+            playbackSpeed = CORE_SCROLL_MAX_SPEED + extraSpeed;
         }
         
         playbackSpeed = Math.min(MAX_PLAYBACK_RATE, Math.max(0, playbackSpeed));
@@ -352,10 +356,83 @@ const uploadForm = document.getElementById('uploadForm');
         return smoothedScrollSpeed;
     }
 
-    function registerScrollActivity() {
-        if (scrollSessionStartTime === null) {
-            scrollSessionStartTime = Date.now();
+    function resetScrollPlaybackSmoothing(value = speedTarget) {
+        smoothedScrollPlaybackSpeed = value;
+    }
+
+    function setScrollPlaybackTarget(targetSpeed) {
+        smoothedScrollPlaybackSpeed = smoothedScrollPlaybackSpeed + 
+            SCROLL_PLAYBACK_SMOOTHING * (targetSpeed - smoothedScrollPlaybackSpeed);
+        return smoothedScrollPlaybackSpeed;
+    }
+
+    function applyScrollPlaybackSpeedTarget(targetSpeed) {
+        const stabilizedSpeed = setScrollPlaybackTarget(targetSpeed);
+        setTargetSpeed(stabilizedSpeed);
+        return stabilizedSpeed;
+    }
+
+    function updateSpeedDecayDisplay(delayMs = SCROLL_DECAY_MIN_DELAY_MS) {
+        const seconds = delayMs / 1000;
+        const clampedSeconds = Math.max(0, Math.min(8, seconds));
+        if (speedDecaySlider) {
+            speedDecaySlider.value = clampedSeconds.toFixed(2);
         }
+        if (speedDecayLabel) {
+            speedDecayLabel.textContent = `${seconds.toFixed(2)}s`;
+        }
+    }
+
+    function calculateDecayDelay(sessionDurationMs = 0) {
+        const normalizedDuration = Math.min(1, sessionDurationMs / SCROLL_DECAY_MAX_SESSION_MS);
+        return SCROLL_DECAY_MIN_DELAY_MS +
+            normalizedDuration * (SCROLL_DECAY_MAX_DELAY_MS - SCROLL_DECAY_MIN_DELAY_MS);
+    }
+
+    function clearSpeedDecayCountdown(options = {}) {
+        if (speedDecayCountdownInterval) {
+            clearInterval(speedDecayCountdownInterval);
+            speedDecayCountdownInterval = null;
+        }
+        speedDecayCountdownTargetTime = null;
+        if (options.resetDisplay) {
+            updateSpeedDecayDisplay(SCROLL_DECAY_MIN_DELAY_MS);
+        }
+    }
+
+    function startSpeedDecayCountdown(durationMs) {
+        clearSpeedDecayCountdown();
+        updateSpeedDecayDisplay(durationMs);
+        if (durationMs <= 0) {
+            startDecayToDefault(0);
+            return;
+        }
+        speedDecayCountdownTargetTime = Date.now() + durationMs;
+        speedDecayCountdownInterval = setInterval(() => {
+            const remainingMs = Math.max(0, speedDecayCountdownTargetTime - Date.now());
+            updateSpeedDecayDisplay(remainingMs);
+            if (remainingMs <= 0) {
+                clearSpeedDecayCountdown();
+                startDecayToDefault(0);
+            }
+        }, 100);
+    }
+
+    function registerScrollActivity() {
+        const now = Date.now();
+        const timeSinceLastEvent = now - lastScrollEventTime;
+        const isNewSession = scrollSessionStartTime === null || timeSinceLastEvent > SCROLL_STOP_DEBOUNCE_MS;
+        
+        if (isNewSession) {
+            scrollSessionStartTime = now;
+            scrollHistory = [];
+            smoothedScrollSpeed = 0;
+            resetScrollPlaybackSmoothing(DEFAULT_DECAY_SPEED);
+            if (inputMode === 'scroll') {
+                setTargetSpeed(DEFAULT_DECAY_SPEED);
+            }
+        }
+        lastScrollEventTime = now;
         if (decayTimeout) {
             clearTimeout(decayTimeout);
             decayTimeout = null;
@@ -368,6 +445,10 @@ const uploadForm = document.getElementById('uploadForm');
             clearTimeout(scrollDecayStartTimeout);
             scrollDecayStartTimeout = null;
         }
+        clearSpeedDecayCountdown();
+        const sessionDuration = scrollSessionStartTime ? now - scrollSessionStartTime : 0;
+        const decayDelay = calculateDecayDelay(sessionDuration);
+        updateSpeedDecayDisplay(decayDelay);
     }
 
     function scheduleScrollDecayAfterInactivity() {
@@ -381,11 +462,8 @@ const uploadForm = document.getElementById('uploadForm');
             scrollSessionStartTime = null;
             scrollDecayStartTimeout = null;
             
-            const normalizedDuration = Math.min(1, sessionDuration / SCROLL_DECAY_MAX_SESSION_MS);
-            const decayDelay = SCROLL_DECAY_MIN_DELAY_MS + 
-                normalizedDuration * (SCROLL_DECAY_MAX_DELAY_MS - SCROLL_DECAY_MIN_DELAY_MS);
-            
-            startDecayToDefault(decayDelay);
+            const decayDelay = calculateDecayDelay(sessionDuration);
+            startSpeedDecayCountdown(decayDelay);
         }, SCROLL_STOP_DEBOUNCE_MS);
     }
 
@@ -642,6 +720,7 @@ const uploadForm = document.getElementById('uploadForm');
                         if (currentScrollDirection !== null && currentScrollDirection !== newDirection) {
                             scrollHistory = [];
                             smoothedScrollSpeed = 0; // Reset smoothed speed when direction changes
+                            resetScrollPlaybackSmoothing(speedTarget);
                         }
                         
                         currentScrollDirection = newDirection;
@@ -662,8 +741,7 @@ const uploadForm = document.getElementById('uploadForm');
                         if (now - lastScrollUpdateTime > SCROLL_UPDATE_INTERVAL_MS) {
                             const calculatedSpeed = calculateScrollSpeed();
                             const playbackSpeed = scrollSpeedToPlaybackSpeed(calculatedSpeed);
-                            
-                            setTargetSpeed(playbackSpeed);
+                            const stabilizedSpeed = applyScrollPlaybackSpeedTarget(playbackSpeed);
                             lastScrollUpdateTime = now;
                             
                             // Update indicator color based on direction
@@ -671,14 +749,14 @@ const uploadForm = document.getElementById('uploadForm');
                                 const indicatorY = Math.max(0, Math.min(rect.height - 60, y - 30));
                                 touchIndicator.style.top = `${indicatorY}px`;
                                 
-                                if (playbackSpeed > 0) {
+                                if (stabilizedSpeed > 0) {
                                     // Forward (scroll down) - blue
-                                    const intensity = Math.abs(playbackSpeed / 2.0);
+                                    const intensity = Math.abs(stabilizedSpeed / 2.0);
                                     const blue = Math.floor(255 * Math.max(0.4, intensity));
                                     touchIndicator.style.background = `rgba(100, 100, ${blue}, 0.8)`;
-                                } else if (playbackSpeed < 0) {
+                                } else if (stabilizedSpeed < 0) {
                                     // Backward (scroll up) - red
-                                    const intensity = Math.abs(playbackSpeed / 2.0);
+                                    const intensity = Math.abs(stabilizedSpeed / 2.0);
                                     const red = Math.floor(255 * Math.max(0.4, intensity));
                                     touchIndicator.style.background = `rgba(${red}, 100, 100, 0.8)`;
                                 } else {
@@ -783,6 +861,7 @@ const uploadForm = document.getElementById('uploadForm');
         if (currentScrollDirection !== null && currentScrollDirection !== newDirection) {
             scrollHistory = [];
             smoothedScrollSpeed = 0; // Reset smoothed speed when direction changes
+            resetScrollPlaybackSmoothing(speedTarget);
         }
         
         currentScrollDirection = newDirection;
@@ -804,20 +883,20 @@ const uploadForm = document.getElementById('uploadForm');
         if (now - lastScrollUpdateTime > SCROLL_UPDATE_INTERVAL_MS) {
             const scrollSpeed = calculateScrollSpeed();
             const playbackSpeed = scrollSpeedToPlaybackSpeed(scrollSpeed);
+            const stabilizedSpeed = applyScrollPlaybackSpeedTarget(playbackSpeed);
             
-            setTargetSpeed(playbackSpeed);
             lastScrollUpdateTime = now;
             
             // Update indicator color based on direction
             if (touchIndicator) {
-                if (playbackSpeed > 0) {
+                if (stabilizedSpeed > 0) {
                     // Forward (scroll down) - blue
-                    const intensity = Math.abs(playbackSpeed / 2.0);
+                    const intensity = Math.abs(stabilizedSpeed / 2.0);
                     const blue = Math.floor(255 * Math.max(0.4, intensity));
                     touchIndicator.style.background = `rgba(100, 100, ${blue}, 0.8)`;
-                } else if (playbackSpeed < 0) {
+                } else if (stabilizedSpeed < 0) {
                     // Backward (scroll up) - red
-                    const intensity = Math.abs(playbackSpeed / 2.0);
+                    const intensity = Math.abs(stabilizedSpeed / 2.0);
                     const red = Math.floor(255 * Math.max(0.4, intensity));
                     touchIndicator.style.background = `rgba(${red}, 100, 100, 0.8)`;
                 } else {
@@ -1343,6 +1422,11 @@ const uploadForm = document.getElementById('uploadForm');
                 bpmParameterGroup.style.opacity = '0.3';
                 bpmParameterGroup.style.pointerEvents = 'none'; // Disable interaction
             }
+            if (speedDecayGroup) {
+                speedDecayGroup.style.display = '';
+            }
+            updateSpeedDecayDisplay(SCROLL_DECAY_MIN_DELAY_MS);
+            resetScrollPlaybackSmoothing(speedTarget);
         } else {
             if (inputModeLabel) inputModeLabel.textContent = 'Tapping/Circling';
             if (leftZoneLabel) leftZoneLabel.textContent = 'Circles Rewind/Forward 🔄';
@@ -1352,9 +1436,14 @@ const uploadForm = document.getElementById('uploadForm');
             if (bpmParameterGroup) {
                 bpmParameterGroup.style.opacity = '1';
                 bpmParameterGroup.style.pointerEvents = 'auto'; // Enable interaction
-                }
             }
+            if (speedDecayGroup) {
+                speedDecayGroup.style.display = 'none';
+            }
+            clearSpeedDecayCountdown({ resetDisplay: true });
+            resetScrollPlaybackSmoothing(speedTarget);
         }
+    }
 
     // Toggle input mode
     if (inputModeToggle) {
@@ -1377,6 +1466,7 @@ const uploadForm = document.getElementById('uploadForm');
             
             // Reset speed to default when switching modes
             setTargetSpeed(DEFAULT_DECAY_SPEED);
+            updateSpeedDecayDisplay(SCROLL_DECAY_MIN_DELAY_MS);
         });
     }
 
@@ -1409,6 +1499,7 @@ const uploadForm = document.getElementById('uploadForm');
     }
     loadDefaultTrack();
     startSpeedIntegrator(); // Start the leaky integrator
+    updateSpeedDecayDisplay(SCROLL_DECAY_MIN_DELAY_MS);
 
     // Cleanup
     window.addEventListener('beforeunload', () => {
