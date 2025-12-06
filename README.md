@@ -26,4 +26,5 @@ py -3 -m http.server 8000
 ```
 Method 3: VSCode Live Server Extension.
 Ensure Live Server Extenstion is installed.
-Open the porject folder and click 'Go Live' on bottom right of VSCode window
+Open the project folder.
+Click 'Go Live' on bottom right of VSCode window. Done.
